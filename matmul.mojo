@@ -144,3 +144,45 @@ fn gbm_paths[layout: Layout](
 
         tensor[tid, i] = tensor[tid, i-1] * exp((mu - 0.5 * sigma ** 2) * dt + sigma * sqrt(dt) * norm[k])
 
+
+fn update_state[input_layout: Layout, output_layout: Layout, paths_layout: Layout, hedge_layout: Layout](
+        input_tensor: LayoutTensor[DType.float32, input_layout, MutableAnyOrigin],
+        output_tensor: LayoutTensor[DType.float32, output_layout, MutableAnyOrigin],
+        paths_tensor: LayoutTensor[DType.float32, paths_layout, MutableAnyOrigin],
+        hedge_tensor: LayoutTensor[DType.float32, hedge_layout, MutableAnyOrigin],
+        dt: Float32,
+        i: Int,
+):
+    # TODO ...
+    var tid = block_idx.x * block_dim.x + thread_idx.x
+    if tid > 0:
+        return
+
+    input_tensor[0, 0] = output_tensor[0, 0]
+    input_tensor[1, 0] = paths_tensor[0, i]
+    input_tensor[2, 0] = input_tensor[2, 0] - dt
+
+    hedge_tensor[0, i] = output_tensor[0, 0]
+
+fn european_call_mse_loss[M: Int, N: Int](
+        paths_tensor: LayoutTensor[DType.float32, Layout.row_major(M, N), MutableAnyOrigin],
+        hedge_tensor: LayoutTensor[DType.float32, Layout.row_major(M, N), MutableAnyOrigin],
+        strike: Float32,
+):
+    # TODO ...
+    var tid = block_idx.x * block_dim.x + thread_idx.x
+    if tid > 0:
+        return
+
+    hedge_cost: Float32 = 0.0
+
+    for i in range(1, N):
+        hedge_cost += (paths_tensor[0, i][0] - paths_tensor[0, i - 1][0]) * hedge_tensor[0, i][0]
+
+    payoff = max(strike - paths_tensor[0, N-1][0], 0)
+    print('hedge cost', hedge_cost)
+    print('payoff', payoff)
+    print('mse', (hedge_cost + payoff) ** 2)
+
+    pass
+

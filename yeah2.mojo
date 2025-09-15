@@ -1,6 +1,6 @@
 from sys import has_accelerator
 from layout.layout_tensor import Layout, LayoutTensor
-from matmul import he_init, matmul, vector_add, relu, tanh, gbm_paths
+from matmul import he_init, matmul, vector_add, relu, tanh, gbm_paths, update_state, european_call_mse_loss
 from gpu.host import DeviceContext, DeviceBuffer, DeviceAttribute, HostBuffer
 
 
@@ -92,14 +92,14 @@ struct InputLayer[M: Int]:
         self.host_buffer = ctx.enqueue_create_host_buffer[DType.float32](M)
         self.host_tensor = LayoutTensor[DType.float32, self.layout, MutableAnyOrigin](self.host_buffer)
 
-    fn __setitem__(self, idx: Int, value: Float32):
-        self.tensor[idx, 0] = Scalar[DType.float32](value)
-
     fn sync_to_gpu(self) raises:
         self.ctx.enqueue_copy(dst_buf=self.buffer, src_buf=self.host_buffer)
         self.ctx.synchronize()
 
     fn print_values(self) raises:
+        self.ctx.enqueue_copy(dst_buf=self.host_buffer, src_buf=self.buffer)
+        self.ctx.synchronize()
+
         print()
         print('==== input ====')
         for i in range(M):
@@ -244,6 +244,41 @@ struct DenseLayer[
                 print('', String(val)[:6])
 
 
+struct HedgePositions[M: Int, N: Int]:
+
+    alias layout: Layout = Layout.row_major(M, N)
+
+    var ctx:         DeviceContext
+    var buffer:      DeviceBuffer[DType.float32]
+    var host_buffer: HostBuffer[DType.float32]
+    var tensor:      LayoutTensor[DType.float32, Self.layout, MutableAnyOrigin]
+    var host_tensor: LayoutTensor[DType.float32, Self.layout, MutableAnyOrigin]
+
+    fn __init__(out self, ctx: DeviceContext) raises:
+        self.ctx = ctx
+
+        self.buffer =      ctx.enqueue_create_buffer[DType.float32](M * N)
+        self.host_buffer = ctx.enqueue_create_host_buffer[DType.float32](M * N)
+        self.tensor =      LayoutTensor[DType.float32, self.layout, MutableAnyOrigin](self.buffer)
+        self.host_tensor = LayoutTensor[DType.float32, self.layout, MutableAnyOrigin](self.host_buffer)
+
+    fn print_values(self) raises:
+        self.ctx.enqueue_copy(dst_buf=self.host_buffer, src_buf=self.buffer)
+        self.ctx.synchronize()
+
+        print()
+        print('==== hedge positions ====')
+        for i in range(M):
+            var row = ''
+            for j in range(N):
+                val = self.host_tensor[i, j]
+                if val < 0:
+                    row += String(val)[:7] + '  '
+                else:
+                    row += ' ' + String(val)[:6] + '  '
+            print(row)
+
+
 fn main() raises:
     ctx = get_ctx()
 
@@ -255,22 +290,57 @@ fn main() raises:
     layer2 = DenseLayer[16, 16, relu_16](ctx, 'layer 2')
     layer3 = DenseLayer[1,  16, tanh_1 ](ctx, 'layer 3')
 
-    paths = GBMPaths[10, steps](ctx, 0.1, 0.05, Float32(steps) / 365)
-    paths.print_values()
+    dt = Float32(1) / 365
+
+    paths = GBMPaths[1, steps](ctx, 0.1, 0.05, dt)
 
     input_layer = InputLayer[3](ctx)
-    input_layer.host_tensor[0, 0] = 1                     # Stock price
-    input_layer.host_tensor[1, 0] = 0                     # Initial hedge
+    input_layer.host_tensor[0, 0] = 0                     # Initial hedge
+    input_layer.host_tensor[1, 0] = 1                     # Stock price
     input_layer.host_tensor[2, 0] = Float32(steps) / 365  # Time to maturity
     input_layer.sync_to_gpu()
-    input_layer.print_values()
 
-    for i in range(steps):
+    hedge = HedgePositions[1, steps](ctx)
+
+    strike: Float32 = 1.1
+
+    for i in range(1, steps):
         layer1.apply(input_layer.tensor)
         layer2.apply(layer1.out_tensor)
         layer3.apply(layer2.out_tensor)
+
+        input_layer.print_values()
         layer3.print_out()
 
+        # TODO ...
+        ctx.enqueue_function[update_state[input_layer.layout, layer3.out_layout, paths.layout, hedge.layout]
+        ](
+            input_layer.tensor,
+            layer3.out_tensor,
+            paths.tensor,
+            hedge.tensor,
+            dt,
+            i,
+            grid_dim=(1),
+            block_dim=(1),
+        )
+
+        ctx.synchronize()
+
+        # input_layer.tensor[0, 0] = layer3.out_tensor[0, 0]    # Update next hedge
+        # input_layer.tensor[1, 0] = paths.tensor[0, i]         # Next stock price
+
+    paths.print_values()
+    hedge.print_values()
+
+    ctx.enqueue_function[european_call_mse_loss[1, steps]
+    ](
+        paths.tensor,
+        hedge.tensor,
+        strike,
+        grid_dim=(1),
+        block_dim=(1),
+    )
 
     # layer1.print_weights()
     # layer1.print_bias()
