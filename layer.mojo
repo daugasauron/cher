@@ -1,8 +1,10 @@
 from layout.layout_tensor import Layout, LayoutTensor, IntTuple
 from gpu.host import DeviceContext, DeviceBuffer, HostBuffer
 from gpu import block_dim, block_idx, thread_idx
+from os import Atomic
 from he_init import he_init
 from math import sqrt, tanh
+from time import monotonic
 from random import randn_float64, seed
 from print_utils import print_matrix_2, print_matrix_3
 
@@ -49,48 +51,6 @@ fn recurrent_kernel[input_size: Int, network_size: Int, steps: Int, num_paths: I
 
 
 
-fn apply_grad_kernel[
-        M:         Int,
-        N:         Int,
-        steps:     Int,
-        num_paths: Int,
-        activation_grad_fn: fn[width: Int](SIMD[DType.float32, width]) -> SIMD[DType.float32, width],
-](
-    weight_tensor:     LayoutTensor[DType.float32, Layout.row_major(M, N),                MutableAnyOrigin],
-    bias_tensor:       LayoutTensor[DType.float32, Layout.row_major(M),                   MutableAnyOrigin],
-    in_tensor:         LayoutTensor[DType.float32, Layout.row_major(N, steps, num_paths), MutableAnyOrigin],
-    out_tensor:        LayoutTensor[DType.float32, Layout.row_major(M, steps, num_paths), MutableAnyOrigin],
-    upstream_tensor:   LayoutTensor[DType.float32, Layout.row_major(M, steps, num_paths), MutableAnyOrigin],
-    downstream_tensor: LayoutTensor[DType.float32, Layout.row_major(N, steps, num_paths), MutableAnyOrigin],
-    learning_rate:     Float32,
-):
-    var tid = block_idx.x * block_dim.x + thread_idx.x
-
-    if tid >= M * N:
-        return
-
-    # Bias
-    if tid < M:
-        for path in range(num_paths):
-            for step in range(1, steps):
-                bias_tensor[tid] -= learning_rate * upstream_tensor[tid, step, path] * activation_grad_fn(out_tensor[tid, step, path])
-
-    # Weights
-    if tid < M * N:
-        var i = tid // N
-        var j = tid %  N
-
-        for path in range(num_paths):
-            for step in range(1, steps):
-                weight_tensor[i, j] -= learning_rate * in_tensor[j, step, path] * upstream_tensor[i, step, path] * activation_grad_fn(out_tensor[i, step, path])
-
-    # Downstream
-    if tid < N:
-        for path in range(num_paths):
-            for step in range(1, steps):
-                downstream_tensor[tid, step, path] = 0
-                for j in range(N):
-                    downstream_tensor[tid, step, path] += weight_tensor[j, tid] * upstream_tensor[j, step, path] * activation_grad_fn(out_tensor[j, step, path])
 
 
 struct DenseLayer[
@@ -237,13 +197,61 @@ struct DenseLayer[
             upstream_tensor: LayoutTensor[DType.float32, Layout.row_major(M, steps, num_paths), MutableAnyOrigin],
             learning_rate: Float32,
     ) raises:
-        self.ctx.enqueue_function[apply_grad_kernel[
-            M,
-            N,
-            steps,
-            num_paths,
-            activation_grad_fn,
-        ]](
+
+        fn apply_grad_kernel(
+            weight_tensor:     LayoutTensor[DType.float32, Layout.row_major(M, N),                MutableAnyOrigin],
+            bias_tensor:       LayoutTensor[DType.float32, Layout.row_major(M),                   MutableAnyOrigin],
+            in_tensor:         LayoutTensor[DType.float32, Layout.row_major(N, steps, num_paths), MutableAnyOrigin],
+            out_tensor:        LayoutTensor[DType.float32, Layout.row_major(M, steps, num_paths), MutableAnyOrigin],
+            upstream_tensor:   LayoutTensor[DType.float32, Layout.row_major(M, steps, num_paths), MutableAnyOrigin],
+            downstream_tensor: LayoutTensor[DType.float32, Layout.row_major(N, steps, num_paths), MutableAnyOrigin],
+            learning_rate:     Float32,
+        ):
+            var tid = block_idx.x * block_dim.x + thread_idx.x
+
+            # if tid >= M * N:
+            if tid >= num_paths:
+                return
+
+            # Bias
+            # for i in range(M):
+            #     for step in range(1, steps):
+            #         bias_tensor[i] -= learning_rate * upstream_tensor[i, step, tid] * activation_grad_fn(out_tensor[i, step, tid])
+
+            if tid < M:
+                for path in range(num_paths):
+                    for step in range(1, steps):
+                        bias_tensor[tid] -= learning_rate * upstream_tensor[tid, step, path] * activation_grad_fn(out_tensor[tid, step, path])
+
+            # Weights
+            # for i in range(M):
+            #     for j in range(N):
+            #         for step in range(1, steps):
+            #             weight_tensor[i, j] -= learning_rate * in_tensor[j, step, tid] * upstream_tensor[i, step, tid] * activation_grad_fn(out_tensor[i, step, tid])
+            if tid < M * N:
+                var i = tid // N
+                var j = tid %  N
+
+                for path in range(num_paths):
+                    for step in range(1, steps):
+                        weight_tensor[i, j] -= learning_rate * in_tensor[j, step, path] * upstream_tensor[i, step, path] * activation_grad_fn(out_tensor[i, step, path])
+
+            # Downstream
+            for i in range(N):
+                for step in range(1, steps):
+                    downstream_tensor[i, step, tid] = 0
+                    for j in range(N):
+                        downstream_tensor[i, step, tid] += weight_tensor[j, i] * upstream_tensor[j, step, tid] * activation_grad_fn(out_tensor[j, step, tid])
+
+            # Downstream
+            # if tid < N:
+            #     for path in range(num_paths):
+            #         for step in range(1, steps):
+            #             downstream_tensor[tid, step, path] = 0
+            #             for j in range(N):
+            #                 downstream_tensor[tid, step, path] += weight_tensor[j, tid] * upstream_tensor[j, step, path] * activation_grad_fn(out_tensor[j, step, path])
+
+        self.ctx.enqueue_function_checked[apply_grad_kernel, apply_grad_kernel](
             self.weight_tensor,
             self.bias_tensor,
             self.in_tensor,
@@ -252,7 +260,7 @@ struct DenseLayer[
             self.grad_tensor,
             learning_rate,
             grid_dim=(1),
-            block_dim=(M * N),
+            block_dim=(num_paths),
         )
         self.ctx.synchronize()
 
@@ -412,6 +420,10 @@ fn update_loss_grad_kernel[num_inputs: Int, steps: Int, num_paths: Int](
             else:
                 grad_tensor[0, i, j] = 0.0
 
+fn yeah(msg: String, time: UInt) -> UInt:
+    var t = monotonic()
+    print(msg, 'elapsed (ms):', (t - time) / 1_000_000)
+    return t
 
 fn main() raises:
     ctx = DeviceContext()
@@ -460,10 +472,14 @@ fn main() raises:
     )
     ctx.synchronize()
 
-    for batch in range(1_000_001):
+    var t = monotonic()
+    for batch in range(1_000_000):
 
         if batch == 100:
             learning_rate = 1e-6
+
+        if batch == 10_000:
+            learning_rate = 1e-7
 
         for step in range(steps - 1):
             layer_1.apply(step)
@@ -485,28 +501,6 @@ fn main() raises:
 
         loss.apply(layer_1.in_tensor)
 
-        if batch % 10 == 0:
-            print('batch', batch)
-            loss.print_loss()
-
-            layer_1.print_input(0)
-            layer_1.print_input(1)
-            layer_1.print_input(2)
-            layer_1.print_input(3)
-            layer_1.print_input(4)
-
-        if batch % 100 == 0:
-            pass
-            print('batch', batch)
-            layer_1.print_weights()
-            layer_1.print_bias()
-
-            layer_2.print_weights()
-            layer_2.print_bias()
-
-            layer_3.print_weights()
-            layer_3.print_bias()
-
         loss.apply_grad(layer_1.in_tensor)
 
         for step in reversed(range(1, steps)):
@@ -522,4 +516,17 @@ fn main() raises:
                 block_dim=(1),
             )
             ctx.synchronize()
+
+        if batch % 10 == 0:
+            print('batch', batch)
+            loss.print_loss()
+
+            layer_1.print_input(0)
+            layer_1.print_input(1)
+            layer_1.print_input(2)
+            layer_1.print_input(3)
+            layer_1.print_input(4)
+
+            t = yeah('batch', t)
+
 
