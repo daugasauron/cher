@@ -21,7 +21,11 @@ fn main() raises:
     alias network_size = 4
     alias num_paths    = 2
 
-    var learning_rate: Float32 = 100
+    var learning_rate: Float32 = 1e-4
+    var beta1:         Float32 = 0.9
+    var beta2:         Float32 = 0.999
+    var eps:           Float32 = 10e-8
+    var weight_decay:  Float32 = 0.01
 
     layer_1 = DenseLayer[network_size, inputs,       steps, num_paths, relu_activation, relu_activation_grad](ctx, 'layer 1')
     layer_2 = DenseLayer[network_size, network_size, steps, num_paths, relu_activation, relu_activation_grad](ctx, 'layer 2')
@@ -94,12 +98,10 @@ fn main() raises:
         loss.print_grad()
 
         for step in reversed(range(1, steps)):
-            layer_3.apply_grad(loss.grad_tensor, learning_rate)
-            print()
-            print('## step', step)
-            layer_3.print_grad(1)
-            layer_2.apply_grad(layer_3.grad_tensor, learning_rate)
-            layer_1.apply_grad(layer_2.grad_tensor, learning_rate)
+            layer_3.apply_grad(loss.grad_tensor, learning_rate, beta1, beta2, eps, weight_decay)
+            layer_2.apply_grad(layer_3.grad_tensor, learning_rate, beta1, beta2, eps, weight_decay)
+            layer_1.apply_grad(layer_2.grad_tensor, learning_rate, beta1, beta2, eps, weight_decay)
+
 
             ctx.enqueue_function[update_loss_grad_kernel[inputs, steps, num_paths]](
                 loss.grad_tensor,
@@ -108,5 +110,8 @@ fn main() raises:
                 grid_dim=(1),
                 block_dim=(1),
             )
+            print()
+            print('## step', step)
+            loss.print_grad()
 
 

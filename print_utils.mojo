@@ -16,7 +16,7 @@ fn print_matrix_2[M: Int, N: Int](ctx: DeviceContext, device_buffer: DeviceBuffe
         print(row)
 
 
-fn print_matrix_3[M: Int, N: Int, K: Int](ctx: DeviceContext, device_buffer: DeviceBuffer[DType.float32], dim: Int, k: Int) raises -> None:
+fn print_matrix_3[M: Int, N: Int, K: Int](ctx: DeviceContext, device_buffer: DeviceBuffer[DType.float32], k: Int) raises -> None:
     host_buffer = ctx.enqueue_create_host_buffer[DType.float32](M * N * K)
     host_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N, K), MutableAnyOrigin](host_buffer)
 
@@ -26,16 +26,21 @@ fn print_matrix_3[M: Int, N: Int, K: Int](ctx: DeviceContext, device_buffer: Dev
     for i in range(M):
         var row = ''
         for j in range(N):
-            if dim == 0:
-                row += padded_f32(host_tensor[k, i, j][0]) + '  '
-            elif dim == 1:
-                row += padded_f32(host_tensor[i, k, j][0]) + '  '
-            elif dim == 2:
-                row += padded_f32(host_tensor[i, j, k][0]) + '  '
-            else:
-                raise Error('invalid dim')
+            row += padded_f32(host_tensor[i, j, k][0]) + '  '
         print(row)
 
+fn print_matrix_special[M: Int, N: Int, K: Int](ctx: DeviceContext, device_buffer: DeviceBuffer[DType.float32]) raises -> None:
+    host_buffer = ctx.enqueue_create_host_buffer[DType.float32](M * N * K)
+    host_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N, K), MutableAnyOrigin](host_buffer)
+
+    ctx.enqueue_copy(dst_buf=host_buffer, src_buf=device_buffer)
+    ctx.synchronize()
+
+    for i in range(K):
+        var row = ''
+        for j in range(N):
+            row += padded_f32(host_tensor[0, j, i][0]) + '  '
+        print(row)
 
 fn padded_f32(x: Float32) -> String:
     """
