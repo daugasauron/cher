@@ -8,6 +8,7 @@ from time import monotonic
 from random import randn_float64, seed
 from print_utils import print_matrix_2, print_matrix_3, print_matrix_special
 
+alias SIMDFloat32 = SIMD[DType.float32, Layout.__init__(IntTuple[__origin_of()](1), IntTuple[__origin_of()](1)).size()]
 
 fn init_paths[num_inputs: Int, steps: Int, num_paths: Int](
     init_tensor:  LayoutTensor[DType.float32, Layout.row_major(steps,      num_paths, 2),         MutableAnyOrigin],
@@ -22,19 +23,6 @@ fn init_paths[num_inputs: Int, steps: Int, num_paths: Int](
         input_tensor[0, i, tid] = init_tensor[i, tid, 0]
         input_tensor[1, i, tid] = init_tensor[i, tid, 1]
 
-
-fn feed_next_kernel[N: Int, steps: Int, num_paths: Int](
-    output_tensor: LayoutTensor[DType.float32, Layout.row_major(N, steps, num_paths), MutableAnyOrigin],
-    input_tensor:  LayoutTensor[DType.float32, Layout.row_major(N, steps, num_paths), MutableAnyOrigin],
-    step: Int
-):
-    var tid = block_idx.x * block_dim.x + thread_idx.x
-
-    if tid >= N:
-        return
-
-    for i in range(num_paths):
-        input_tensor[tid, step, i] = output_tensor[tid, step, i]
 
 fn recurrent_kernel[input_size: Int, network_size: Int, steps: Int, num_paths: Int](
     output_tensor: LayoutTensor[DType.float32, Layout.row_major(1,          steps, num_paths), MutableAnyOrigin],
@@ -51,10 +39,10 @@ fn recurrent_kernel[input_size: Int, network_size: Int, steps: Int, num_paths: I
 
 
 struct DenseLayer[
-        M: Int, 
-        N: Int, 
-        steps: Int, 
-        num_paths: Int,
+        M:                  Int, 
+        N:                  Int, 
+        steps:              Int, 
+        num_paths:          Int,
         activation_fn:      fn[width: Int](SIMD[DType.float32, width]) -> SIMD[DType.float32, width],
         activation_grad_fn: fn[width: Int](SIMD[DType.float32, width]) -> SIMD[DType.float32, width],
 ]:
@@ -65,7 +53,11 @@ struct DenseLayer[
     alias out_layout:     Layout = Layout.row_major(M, steps, num_paths)
     alias in_vec_layout:  Layout = Layout.row_major(N, num_paths)
     alias out_vec_layout: Layout = Layout.row_major(M, num_paths)
-    alias grad_layout:    Layout = Layout.row_major(N, steps, num_paths)
+
+    alias WeightTensorType = LayoutTensor[DType.float32, Self.weight_layout,  MutableAnyOrigin]
+    alias BiasTensorType   = LayoutTensor[DType.float32, Self.bias_layout,    MutableAnyOrigin]
+    alias InTensorType     = LayoutTensor[DType.float32, Self.in_layout,      MutableAnyOrigin]
+    alias OutTensorType    = LayoutTensor[DType.float32, Self.out_layout,     MutableAnyOrigin]
 
     alias random_seed: Int = 42
     alias random_size: Int = 4
@@ -84,15 +76,15 @@ struct DenseLayer[
     var out_buffer             : DeviceBuffer[DType.float32]
     var grad_buffer            : DeviceBuffer[DType.float32]
 
-    var weight_tensor:          LayoutTensor[DType.float32, Self.weight_layout,  MutableAnyOrigin]
-    var adams_weight_m1_tensor: LayoutTensor[DType.float32, Self.weight_layout,  MutableAnyOrigin]
-    var adams_weight_m2_tensor: LayoutTensor[DType.float32, Self.weight_layout,  MutableAnyOrigin]
-    var bias_tensor:            LayoutTensor[DType.float32, Self.bias_layout,    MutableAnyOrigin]
-    var adams_bias_m1_tensor:   LayoutTensor[DType.float32, Self.bias_layout,    MutableAnyOrigin]
-    var adams_bias_m2_tensor:   LayoutTensor[DType.float32, Self.bias_layout,    MutableAnyOrigin]
-    var in_tensor:              LayoutTensor[DType.float32, Self.in_layout,      MutableAnyOrigin]
-    var out_tensor:             LayoutTensor[DType.float32, Self.out_layout,     MutableAnyOrigin]
-    var grad_tensor:            LayoutTensor[DType.float32, Self.grad_layout,    MutableAnyOrigin]
+    var weight_tensor:          Self.WeightTensorType
+    var adams_weight_m1_tensor: Self.WeightTensorType
+    var adams_weight_m2_tensor: Self.WeightTensorType
+    var bias_tensor:            Self.BiasTensorType
+    var adams_bias_m1_tensor:   Self.BiasTensorType
+    var adams_bias_m2_tensor:   Self.BiasTensorType
+    var in_tensor:              Self.InTensorType
+    var out_tensor:             Self.OutTensorType
+    var grad_tensor:            Self.InTensorType
 
     var counter: Int
 
@@ -110,15 +102,15 @@ struct DenseLayer[
         self.out_buffer             = ctx.enqueue_create_buffer[DType.float32](M * steps * num_paths)
         self.grad_buffer            = ctx.enqueue_create_buffer[DType.float32](N * steps * num_paths)
 
-        self.weight_tensor          = LayoutTensor[DType.float32, self.weight_layout,  MutableAnyOrigin](self.weight_buffer)
-        self.adams_weight_m1_tensor = LayoutTensor[DType.float32, self.weight_layout,  MutableAnyOrigin](self.adams_weight_m1_buffer)
-        self.adams_weight_m2_tensor = LayoutTensor[DType.float32, self.weight_layout,  MutableAnyOrigin](self.adams_weight_m2_buffer)
-        self.bias_tensor            = LayoutTensor[DType.float32, self.bias_layout,    MutableAnyOrigin](self.bias_buffer)
-        self.adams_bias_m1_tensor   = LayoutTensor[DType.float32, self.bias_layout,    MutableAnyOrigin](self.adams_bias_m1_buffer)
-        self.adams_bias_m2_tensor   = LayoutTensor[DType.float32, self.bias_layout,    MutableAnyOrigin](self.adams_bias_m2_buffer)
-        self.in_tensor              = LayoutTensor[DType.float32, self.in_layout,      MutableAnyOrigin](self.in_buffer)
-        self.out_tensor             = LayoutTensor[DType.float32, self.out_layout,     MutableAnyOrigin](self.out_buffer)
-        self.grad_tensor            = LayoutTensor[DType.float32, self.grad_layout,    MutableAnyOrigin](self.grad_buffer)
+        self.weight_tensor          = Self.WeightTensorType(self.weight_buffer)
+        self.adams_weight_m1_tensor = Self.WeightTensorType(self.adams_weight_m1_buffer)
+        self.adams_weight_m2_tensor = Self.WeightTensorType(self.adams_weight_m2_buffer)
+        self.bias_tensor            = Self.BiasTensorType(self.bias_buffer)
+        self.adams_bias_m1_tensor   = Self.BiasTensorType(self.adams_bias_m1_buffer)
+        self.adams_bias_m2_tensor   = Self.BiasTensorType(self.adams_bias_m2_buffer)
+        self.in_tensor              = Self.InTensorType(self.in_buffer)
+        self.out_tensor             = Self.OutTensorType(self.out_buffer)
+        self.grad_tensor            = Self.InTensorType(self.grad_buffer)
 
         self.counter = 1
 
@@ -161,10 +153,10 @@ struct DenseLayer[
     ) raises:
 
         fn apply_kernel(
-            weight_tensor: LayoutTensor[DType.float32, Layout.row_major(M, N),                MutableAnyOrigin],
-            bias_tensor:   LayoutTensor[DType.float32, Layout.row_major(M),                   MutableAnyOrigin],
-            in_tensor:     LayoutTensor[DType.float32, Layout.row_major(N, steps, num_paths), MutableAnyOrigin],
-            out_tensor:    LayoutTensor[DType.float32, Layout.row_major(M, steps, num_paths), MutableAnyOrigin],
+            weight_tensor: Self.WeightTensorType,
+            bias_tensor:   Self.BiasTensorType,
+            in_tensor:     Self.InTensorType,
+            out_tensor:    Self.OutTensorType,
             step:          Int,
         ):
             var tid = block_idx.x * block_dim.x + thread_idx.x
@@ -173,11 +165,11 @@ struct DenseLayer[
                 return
 
             for i in range(M):
-                value: Float32 = 0
+                value: SIMDFloat32 = 0
                 for j in range(N):
-                    value += weight_tensor[i, j][0] * in_tensor[j, step, tid][0]
+                    value += weight_tensor[i, j] * in_tensor[j, step, tid]
 
-                value += bias_tensor[i][0]
+                value += bias_tensor[i]
                 value = activation_fn(value)
 
                 out_tensor[i, step, tid] = value
@@ -195,7 +187,7 @@ struct DenseLayer[
 
     fn apply_grad(
             mut self,
-            upstream_tensor: LayoutTensor[DType.float32, Layout.row_major(M, steps, num_paths), MutableAnyOrigin],
+            upstream_tensor: Self.OutTensorType,
             learning_rate:   Float32,
             beta1:           Float32,
             beta2:           Float32,
@@ -204,16 +196,16 @@ struct DenseLayer[
     ) raises:
 
         fn apply_grad_kernel(
-            weight_tensor:          LayoutTensor[DType.float32, Layout.row_major(M, N),                MutableAnyOrigin],
-            adams_weight_m1_tensor: LayoutTensor[DType.float32, Layout.row_major(M, N),                MutableAnyOrigin],
-            adams_weight_m2_tensor: LayoutTensor[DType.float32, Layout.row_major(M, N),                MutableAnyOrigin],
-            bias_tensor:            LayoutTensor[DType.float32, Layout.row_major(M),                   MutableAnyOrigin],
-            adams_bias_m1_tensor:   LayoutTensor[DType.float32, Layout.row_major(M),                   MutableAnyOrigin],
-            adams_bias_m2_tensor:   LayoutTensor[DType.float32, Layout.row_major(M),                   MutableAnyOrigin],
-            in_tensor:              LayoutTensor[DType.float32, Layout.row_major(N, steps, num_paths), MutableAnyOrigin],
-            out_tensor:             LayoutTensor[DType.float32, Layout.row_major(M, steps, num_paths), MutableAnyOrigin],
-            upstream_tensor:        LayoutTensor[DType.float32, Layout.row_major(M, steps, num_paths), MutableAnyOrigin],
-            downstream_tensor:      LayoutTensor[DType.float32, Layout.row_major(N, steps, num_paths), MutableAnyOrigin],
+            weight_tensor:          Self.WeightTensorType,
+            adams_weight_m1_tensor: Self.WeightTensorType,
+            adams_weight_m2_tensor: Self.WeightTensorType,
+            bias_tensor:            Self.BiasTensorType,
+            adams_bias_m1_tensor:   Self.BiasTensorType,
+            adams_bias_m2_tensor:   Self.BiasTensorType,
+            in_tensor:              Self.InTensorType,
+            out_tensor:             Self.OutTensorType,
+            upstream_tensor:        Self.OutTensorType,
+            downstream_tensor:      Self.InTensorType,
             counter:                Int,
             learning_rate:          Float32,
             beta1:                  Float32,
@@ -227,7 +219,7 @@ struct DenseLayer[
                 return
 
             if tid < M:
-                bias_update: SIMD[DType.float32, Layout.__init__(IntTuple[__origin_of()](1), IntTuple[__origin_of()](1)).size()] = 0
+                bias_update: SIMDFloat32 = 0
                 for path in range(num_paths):
                     for step in range(1, steps):
                         bias_update += upstream_tensor[tid, step, path] * activation_grad_fn(out_tensor[tid, step, path])
@@ -247,7 +239,7 @@ struct DenseLayer[
                 adams_bias_m2_tensor[tid] = bias_m2_new
 
             if tid < M * N:
-                weight_update: SIMD[DType.float32, Layout.__init__(IntTuple[__origin_of()](1), IntTuple[__origin_of()](1)).size()] = 0
+                weight_update: SIMDFloat32 = 0
                 var i = tid // N
                 var j = tid %  N
 
@@ -274,7 +266,7 @@ struct DenseLayer[
             if tid < num_paths:
                 for i in range(N):
                     for step in range(steps - 1):
-                        value: SIMD[DType.float32, Layout.__init__(IntTuple[__origin_of()](1), IntTuple[__origin_of()](1)).size()] = 0
+                        value: SIMDFloat32 = 0
                         for j in range(M):
                             value += weight_tensor[j, i] * upstream_tensor[j, step, tid] * activation_grad_fn(out_tensor[j, step, tid])
                         downstream_tensor[i, step, tid] = value
@@ -304,10 +296,23 @@ struct DenseLayer[
 
     fn feed_next(
             self,
-            next_in_tensor: LayoutTensor[DType.float32, Layout.row_major(Self.M, Self.steps, Self.num_paths), MutableAnyOrigin],
+            next_in_tensor: Self.OutTensorType,
             step: Int,
     ) raises:
-        self.ctx.enqueue_function[feed_next_kernel[Self.M, Self.steps, Self.num_paths]](
+        fn feed_next_kernel(
+            output_tensor: Self.OutTensorType,
+            input_tensor:  Self.OutTensorType,
+            step: Int
+        ):
+            var tid = block_idx.x * block_dim.x + thread_idx.x
+
+            if tid >= M:
+                return
+
+            for i in range(num_paths):
+                input_tensor[tid, step, i] = output_tensor[tid, step, i]
+
+        self.ctx.enqueue_function_checked[feed_next_kernel, feed_next_kernel](
             self.out_tensor,
             next_in_tensor,
             step,
@@ -321,23 +326,25 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
     var ctx: DeviceContext
 
-    var result_buffer: DeviceBuffer[DType.float32]
-    var result_tensor: LayoutTensor[DType.float32, Layout.row_major(1), MutableAnyOrigin]
+    alias ResultTensorType = LayoutTensor[DType.float32, Layout.row_major(1),                            MutableAnyOrigin]
+    alias GradTensorType   = LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths),          MutableAnyOrigin]
+    alias InputTensorType  = LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutableAnyOrigin] 
 
-    var grad_buffer: DeviceBuffer[DType.float32]
-    var grad_tensor: LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths), MutableAnyOrigin]
+    var result_buffer: DeviceBuffer[DType.float32]
+    var grad_buffer:   DeviceBuffer[DType.float32]
+
+    var result_tensor: Self.ResultTensorType
+    var grad_tensor:   Self.GradTensorType
 
     var strike: Float32
 
     fn __init__(out self, ctx: DeviceContext, strike: Float32) raises:
         self.ctx = ctx
         self.strike = strike
-
         self.result_buffer = ctx.enqueue_create_buffer[DType.float32](1)
-        self.result_tensor = LayoutTensor[DType.float32, Layout.row_major(1), MutableAnyOrigin](self.result_buffer)
-
-        self.grad_buffer = ctx.enqueue_create_buffer[DType.float32](steps * num_paths)
-        self.grad_tensor = LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths), MutableAnyOrigin](self.grad_buffer)
+        self.grad_buffer   = ctx.enqueue_create_buffer[DType.float32](1 * steps * num_paths)
+        self.result_tensor = Self.ResultTensorType(self.result_buffer)
+        self.grad_tensor   = Self.GradTensorType(self.grad_buffer)
 
     fn print_loss(self) raises:
         print()
@@ -351,12 +358,12 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
     fn apply[layout: Layout](
             self, 
-            input_tensor: LayoutTensor[DType.float32, layout, MutableAnyOrigin], 
+            input_tensor: LayoutTensor[DType.float32, layout, MutableAnyOrigin]
     ) raises:
 
         fn european_call_loss_kernel(
-            input_tensor:  LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutableAnyOrigin],
-            result_tensor: LayoutTensor[DType.float32, Layout.row_major(1),                            MutableAnyOrigin],
+            input_tensor:  Self.InputTensorType,
+            result_tensor: Self.ResultTensorType,
             strike: Float32,
         ):
             var tid = block_idx.x * block_dim.x + thread_idx.x
@@ -366,7 +373,7 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
             result_tensor[0] = 0
 
-            var value: SIMD[DType.float32, Layout.__init__(IntTuple[__origin_of()](1), IntTuple[__origin_of()](1)).size()]
+            var value: SIMDFloat32
             for i in range(num_paths):
                 value = 0
                 for j in range(1, steps):
@@ -384,22 +391,22 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
         )
         self.ctx.synchronize()
 
-    fn apply_grad[layout: Layout](
+    fn apply_grad(
             self,
-            input_tensor: LayoutTensor[DType.float32, layout, MutableAnyOrigin], 
+            input_tensor: Self.InputTensorType,
     ) raises:
 
         fn european_call_grad_kernel(
-            input_tensor:  LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutableAnyOrigin],
-            grad_tensor:   LayoutTensor[DType.float32, Layout.row_major(1,          steps, num_paths), MutableAnyOrigin],
-            strike: Float32,
+            input_tensor: Self.InputTensorType,
+            grad_tensor:  Self.GradTensorType,
+            strike:       Float32,
         ):
             var tid = block_idx.x * block_dim.x + thread_idx.x
 
             if tid > 0:
                 return
 
-            var value: SIMD[DType.float32, Layout.__init__(IntTuple[__origin_of()](1), IntTuple[__origin_of()](1)).size()]
+            var value: SIMDFloat32
 
             for i in range(num_paths):
 
@@ -540,11 +547,6 @@ fn main() raises:
 
         loss.apply_grad(layer_1.in_tensor)
 
-        # if batch % 500 == 0:
-        #     print()
-        #     print('## loss grad')
-        #     loss.print_grad()
-
         for step in reversed(range(1, steps)):
             layer_3.apply_grad(loss.grad_tensor,    learning_rate, beta1, beta2, eps, weight_decay)
             layer_2.apply_grad(layer_3.grad_tensor, learning_rate, beta1, beta2, eps, weight_decay)
@@ -558,11 +560,6 @@ fn main() raises:
                 block_dim=(1),
             )
             ctx.synchronize()
-            # if batch % 500 == 0:
-            #     print()
-            #     print('## step', step)
-            #     layer_1.print_grad(0)
-            #     loss.print_grad()
 
         if batch % 10 == 0:
             print('batch', batch)
