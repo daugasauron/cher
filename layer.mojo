@@ -1,14 +1,18 @@
 from layout.layout_tensor import Layout, LayoutTensor, IntTuple
-from gpu.host import DeviceContext, DeviceBuffer, HostBuffer
-from gpu import block_dim, block_idx, thread_idx
+from gpu.host import DeviceContext, DeviceBuffer, DeviceAttribute, HostBuffer
+from gpu.memory import AddressSpace
+from gpu.cluster import cluster_arrive, cluster_wait
+from gpu import block_dim, block_idx, thread_idx, barrier, block
 from os import Atomic
 from he_init import he_init
 from math import sqrt, tanh
 from time import monotonic
 from random import randn_float64, seed
+from utils.numerics import isfinite
 from print_utils import print_matrix_2, print_matrix_3, print_matrix_special
 
 alias SIMDFloat32 = SIMD[DType.float32, Layout.__init__(IntTuple[__origin_of()](1), IntTuple[__origin_of()](1)).size()]
+alias TPB = 1024
 
 fn init_paths[num_inputs: Int, steps: Int, num_paths: Int](
     init_tensor:  LayoutTensor[DType.float32, Layout.row_major(steps,      num_paths, 2),         MutableAnyOrigin],
@@ -63,8 +67,13 @@ struct DenseLayer[
     alias random_size: Int = 4
     alias random_draws: Int = (N * M + Self.random_size - 1) // Self.random_size
 
-    var layer_name: String
-    var ctx: DeviceContext
+    var ctx:           DeviceContext
+    var layer_name:    String
+    var learning_rate: Float32
+    var beta1:         Float32
+    var beta2:         Float32
+    var eps:           Float32
+    var weight_decay:  Float32
 
     var weight_buffer          : DeviceBuffer[DType.float32]
     var adams_weight_m1_buffer : DeviceBuffer[DType.float32]
@@ -88,9 +97,23 @@ struct DenseLayer[
 
     var counter: Int
 
-    fn __init__(out self, ctx: DeviceContext, layer_name: String) raises:
+    fn __init__(
+            out self, 
+            ctx:           DeviceContext, 
+            layer_name:    String, 
+            learning_rate: Float32,
+            beta1:         Float32,
+            beta2:         Float32,
+            eps:           Float32,
+            weight_decay:  Float32,
+    ) raises:
         self.ctx = ctx
         self.layer_name = layer_name
+        self.learning_rate = learning_rate
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        self.weight_decay = weight_decay
 
         self.weight_buffer          = ctx.enqueue_create_buffer[DType.float32](M * N)
         self.adams_weight_m1_buffer = ctx.enqueue_create_buffer[DType.float32](M * N)
@@ -147,10 +170,7 @@ struct DenseLayer[
         print('====', self.layer_name, 'grad, path:', path, ' ====')
         print_matrix_3[N, steps, num_paths](self.ctx, self.grad_buffer, path)
 
-    fn apply(
-            self,
-            step: Int,
-    ) raises:
+    fn apply(self, step: Int) raises:
 
         fn apply_kernel(
             weight_tensor: Self.WeightTensorType,
@@ -185,15 +205,7 @@ struct DenseLayer[
         )
         self.ctx.synchronize()
 
-    fn apply_grad(
-            mut self,
-            upstream_tensor: Self.OutTensorType,
-            learning_rate:   Float32,
-            beta1:           Float32,
-            beta2:           Float32,
-            eps:             Float32,
-            weight_decay:    Float32,
-    ) raises:
+    fn apply_grad(mut self, upstream_tensor: Self.OutTensorType) raises:
 
         fn apply_grad_kernel(
             weight_tensor:          Self.WeightTensorType,
@@ -283,15 +295,166 @@ struct DenseLayer[
             upstream_tensor,
             self.grad_tensor,
             self.counter,
-            learning_rate,
-            beta1,
-            beta2,
-            eps,
-            weight_decay,
+            self.learning_rate,
+            self.beta1,
+            self.beta2,
+            self.eps,
+            self.weight_decay,
             grid_dim=(1),
             block_dim=(num_paths),
         )
         self.ctx.synchronize()
+        self.counter += 1
+
+    fn apply_grad_fast(mut self, upstream_tensor: Self.OutTensorType) raises:
+
+        fn downstream_kernel(
+            weight_tensor:          Self.WeightTensorType,
+            out_tensor:             Self.OutTensorType,
+            upstream_tensor:        Self.OutTensorType,
+            downstream_tensor:      Self.InTensorType,
+        ):
+            j    = block_idx.x
+            step = block_idx.y
+            path = thread_idx.x
+
+            value: Float32 = 0
+            for i in range(M):
+                value += weight_tensor[i, j][0] * upstream_tensor[i, step, path][0] * activation_grad_fn(out_tensor[i, step, path])[0]
+            downstream_tensor[j, step, path] = value
+
+        fn path_sum_kernel(
+            weight_tensor:          Self.WeightTensorType,
+            bias_tensor:            Self.BiasTensorType,
+            in_tensor:              Self.InTensorType,
+            out_tensor:             Self.OutTensorType,
+            upstream_tensor:        Self.OutTensorType,
+            weight_temp_tensor:     LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutableAnyOrigin],
+            bias_temp_tensor:       LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutableAnyOrigin],
+        ):
+            i    = block_idx.x
+            j    = block_idx.y
+            step = block_idx.z + 1
+            path = thread_idx.x
+
+            bias_update:   Float32 = upstream_tensor[i, step, path][0] * activation_grad_fn(out_tensor[i, step, path])[0]
+            weight_update: Float32 = in_tensor[j, step, path][0] * bias_update
+
+            weight_temp_tensor[i, j, step - 1] = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](weight_update))
+
+            if j == 0:
+                bias_temp_tensor[i, step - 1] = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](bias_update))
+
+        fn update_kernel(
+            weight_tensor:          Self.WeightTensorType,
+            adams_weight_m1_tensor: Self.WeightTensorType,
+            adams_weight_m2_tensor: Self.WeightTensorType,
+            bias_tensor:            Self.BiasTensorType,
+            adams_bias_m1_tensor:   Self.BiasTensorType,
+            adams_bias_m2_tensor:   Self.BiasTensorType,
+            weight_temp_tensor:     LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutableAnyOrigin],
+            bias_temp_tensor:       LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutableAnyOrigin],
+            counter:                Int,
+            learning_rate:          Float32,
+            beta1:                  Float32,
+            beta2:                  Float32,
+            eps:                    Float32,
+            weight_decay:           Float32,
+        ):
+            i    = block_idx.x
+            j    = block_idx.y
+            step = thread_idx.x
+
+            weight_update_t: Float32 = weight_temp_tensor[i, j, step][0]
+            bias_update_t:   Float32 = bias_temp_tensor[i, step][0]
+
+            weight_update = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](weight_update_t))
+            bias_update   = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](bias_update_t))
+
+            cluster_arrive()
+            cluster_wait()
+
+            weight_m1_old = adams_weight_m1_tensor[i, j]
+            weight_m2_old = adams_weight_m2_tensor[i, j]
+
+            weight_m1_new = beta1 * weight_m1_old + (1 - beta1) * weight_update
+            weight_m2_new = beta2 * weight_m2_old + (1 - beta2) * weight_update * weight_update
+
+            weight_m1_hat = weight_m1_new / (1 - pow(beta1, counter))
+            weight_m2_hat = weight_m2_new / (1 - pow(beta2, counter))
+
+            weight_tensor[i, j] -= learning_rate * weight_decay * weight_tensor[i, j]
+            weight_tensor[i, j] -= learning_rate * weight_m1_hat / (sqrt(weight_m2_hat) + eps)
+
+            adams_weight_m1_tensor[i, j] = weight_m1_new
+            adams_weight_m2_tensor[i, j] = weight_m2_new
+
+            if j == 0:
+                m1_old = adams_bias_m1_tensor[i]
+                m2_old = adams_bias_m2_tensor[i]
+
+                m1_new = beta1 * m1_old + (1 - beta1) * bias_update
+                m2_new = beta2 * m2_old + (1 - beta2) * bias_update * bias_update
+
+                m1_hat = m1_new / (1 - pow(beta1, counter))
+                m2_hat = m2_new / (1 - pow(beta2, counter))
+
+                bias_tensor[i] -= learning_rate * m1_hat / (sqrt(m2_hat) + eps)
+
+                adams_bias_m1_tensor[i] = m1_new
+                adams_bias_m2_tensor[i] = m2_new
+
+
+        weight_temp_buffer = self.ctx.enqueue_create_buffer[DType.float32](M * N * steps - 1)
+        bias_temp_buffer   = self.ctx.enqueue_create_buffer[DType.float32](M * steps - 1)
+
+        weight_temp_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutableAnyOrigin](weight_temp_buffer)
+        bias_temp_tensor   = LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutableAnyOrigin](bias_temp_buffer)
+
+        self.ctx.enqueue_function_checked[downstream_kernel, downstream_kernel](
+            self.weight_tensor,
+            self.out_tensor,
+            upstream_tensor,
+            self.grad_tensor,
+            grid_dim=(N, steps - 1),
+            block_dim=(num_paths),
+        )
+
+        self.ctx.enqueue_function_checked[path_sum_kernel, path_sum_kernel](
+            self.weight_tensor,
+            self.bias_tensor,
+            self.in_tensor,
+            self.out_tensor,
+            upstream_tensor,
+            weight_temp_tensor,
+            bias_temp_tensor,
+            grid_dim=(M, N, steps - 1),
+            block_dim=(num_paths),
+        )
+
+        self.ctx.synchronize()
+
+        self.ctx.enqueue_function_checked[update_kernel, update_kernel](
+            self.weight_tensor,
+            self.adams_weight_m1_tensor,
+            self.adams_weight_m2_tensor,
+            self.bias_tensor,
+            self.adams_bias_m1_tensor,
+            self.adams_bias_m2_tensor,
+            weight_temp_tensor,
+            bias_temp_tensor,
+            self.counter,
+            self.learning_rate,
+            self.beta1,
+            self.beta2,
+            self.eps,
+            self.weight_decay,
+            grid_dim=(M, N),
+            block_dim=(steps - 1),
+        )
+
+        self.ctx.synchronize()
+
         self.counter += 1
 
     fn feed_next(
@@ -430,22 +593,22 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
         self.ctx.synchronize()
 
 
-fn relu_activation[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
+fn relu_act[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
     return max(y, 0)
 
 
-fn relu_activation_grad[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
+fn relu_act_grad[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
     if y > 0:
         return 1
     else:
         return 0
 
 
-fn tanh_activation[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
+fn tanh_act[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
     return tanh(y)
 
 
-fn tanh_activation_grad[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
+fn tanh_act_grad[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
     return 1 - y ** 2
 
 
@@ -474,22 +637,30 @@ fn yeah(msg: String, time: UInt) -> UInt:
 fn main() raises:
     ctx = DeviceContext()
 
+    print('Runnint on', ctx.name())
+    print('MULTIPROCESSOR_COUNT                ', ctx.get_attribute(DeviceAttribute.MULTIPROCESSOR_COUNT))
+    print('MAX_BLOCKS_PER_MULTIPROCESSOR       ', ctx.get_attribute(DeviceAttribute.MAX_BLOCKS_PER_MULTIPROCESSOR))
+    print('MAX_THREADS_PER_BLOCK               ', ctx.get_attribute(DeviceAttribute.MAX_THREADS_PER_BLOCK))
+    print('WARP_SIZE                           ', ctx.get_attribute(DeviceAttribute.WARP_SIZE))
+    print('MAX_SHARED_MEMORY_PER_BLOCK         ', ctx.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_BLOCK))
+    print('MAX_SHARED_MEMORY_PER_MULTIPROCESSOR', ctx.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_MULTIPROCESSOR))
+    print()
+
     alias inputs       = 3
     alias steps        = 20
     alias network_size = 16
     alias num_paths    = 1024
 
-    var learning_rate: Float32 = 1e-3
+    var learning_rate: Float32 = 1e-4
     var beta1:         Float32 = 0.9
     var beta2:         Float32 = 0.999
     var eps:           Float32 = 10e-8
     var weight_decay:  Float32 = 0.01
 
-    layer_1 = DenseLayer[network_size, inputs,       steps, num_paths, relu_activation, relu_activation_grad](ctx, 'layer 1')
-    layer_2 = DenseLayer[network_size, network_size, steps, num_paths, relu_activation, relu_activation_grad](ctx, 'layer 2')
-    layer_3 = DenseLayer[1,            network_size, steps, num_paths, tanh_activation, tanh_activation_grad](ctx, 'layer 3')
-
-    loss = EuropeanCallLoss[inputs, steps, num_paths](ctx, 1.05)
+    layer_1 = DenseLayer[network_size, inputs,       steps, num_paths, relu_act, relu_act_grad](ctx, 'layer 1', learning_rate, beta1, beta2, eps, weight_decay)
+    layer_2 = DenseLayer[network_size, network_size, steps, num_paths, relu_act, relu_act_grad](ctx, 'layer 2', learning_rate, beta1, beta2, eps, weight_decay)
+    layer_3 = DenseLayer[1,            network_size, steps, num_paths, tanh_act, tanh_act_grad](ctx, 'layer 3', learning_rate, beta1, beta2, eps, weight_decay)
+    loss    = EuropeanCallLoss[inputs, steps, num_paths](ctx, 1.05)
 
     var host_init_buffer   = ctx.enqueue_create_host_buffer[DType.float32](num_paths * steps * 2)
     var device_init_buffer = ctx.enqueue_create_buffer[DType.float32](num_paths * steps * 2)
@@ -548,9 +719,9 @@ fn main() raises:
         loss.apply_grad(layer_1.in_tensor)
 
         for step in reversed(range(1, steps)):
-            layer_3.apply_grad(loss.grad_tensor,    learning_rate, beta1, beta2, eps, weight_decay)
-            layer_2.apply_grad(layer_3.grad_tensor, learning_rate, beta1, beta2, eps, weight_decay)
-            layer_1.apply_grad(layer_2.grad_tensor, learning_rate, beta1, beta2, eps, weight_decay)
+            layer_3.apply_grad_fast(loss.grad_tensor)
+            layer_2.apply_grad_fast(layer_3.grad_tensor)
+            layer_1.apply_grad_fast(layer_2.grad_tensor)
 
             ctx.enqueue_function[update_loss_grad_kernel[inputs, steps, num_paths]](
                 loss.grad_tensor,
@@ -561,7 +732,7 @@ fn main() raises:
             )
             ctx.synchronize()
 
-        if batch % 10 == 0:
+        if batch % 100 == 0:
             print('batch', batch)
             loss.print_loss()
 
