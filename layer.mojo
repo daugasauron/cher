@@ -11,7 +11,6 @@ from random import randn_float64, seed
 from utils.numerics import isfinite
 from print_utils import print_matrix_2, print_matrix_3, print_matrix_special
 
-alias SIMDFloat32 = SIMD[DType.float32, Layout.__init__(IntTuple[__origin_of()](1), IntTuple[__origin_of()](1)).size()]
 alias TPB = 1024
 
 fn init_paths[num_inputs: Int, steps: Int, num_paths: Int](
@@ -185,11 +184,11 @@ struct DenseLayer[
                 return
 
             for i in range(M):
-                value: SIMDFloat32 = 0
+                value: Float32 = 0
                 for j in range(N):
-                    value += weight_tensor[i, j] * in_tensor[j, step, tid]
+                    value += weight_tensor[i, j][0] * in_tensor[j, step, tid][0]
 
-                value += bias_tensor[i]
+                value += bias_tensor[i][0]
                 value = activation_fn(value)
 
                 out_tensor[i, step, tid] = value
@@ -206,107 +205,6 @@ struct DenseLayer[
         self.ctx.synchronize()
 
     fn apply_grad(mut self, upstream_tensor: Self.OutTensorType) raises:
-
-        fn apply_grad_kernel(
-            weight_tensor:          Self.WeightTensorType,
-            adams_weight_m1_tensor: Self.WeightTensorType,
-            adams_weight_m2_tensor: Self.WeightTensorType,
-            bias_tensor:            Self.BiasTensorType,
-            adams_bias_m1_tensor:   Self.BiasTensorType,
-            adams_bias_m2_tensor:   Self.BiasTensorType,
-            in_tensor:              Self.InTensorType,
-            out_tensor:             Self.OutTensorType,
-            upstream_tensor:        Self.OutTensorType,
-            downstream_tensor:      Self.InTensorType,
-            counter:                Int,
-            learning_rate:          Float32,
-            beta1:                  Float32,
-            beta2:                  Float32,
-            eps:                    Float32,
-            weight_decay:           Float32,
-        ):
-            var tid = block_idx.x * block_dim.x + thread_idx.x
-
-            if tid >= num_paths:
-                return
-
-            if tid < M:
-                bias_update: SIMDFloat32 = 0
-                for path in range(num_paths):
-                    for step in range(1, steps):
-                        bias_update += upstream_tensor[tid, step, path] * activation_grad_fn(out_tensor[tid, step, path])
-
-                bias_m1_old = adams_bias_m1_tensor[tid]
-                bias_m2_old = adams_bias_m2_tensor[tid]
-
-                bias_m1_new = beta1 * bias_m1_old + (1 - beta1) * bias_update
-                bias_m2_new = beta2 * bias_m2_old + (1 - beta2) * bias_update * bias_update
-
-                bias_m1_hat = bias_m1_new / (1 - pow(beta1, counter))
-                bias_m2_hat = bias_m2_new / (1 - pow(beta2, counter))
-
-                bias_tensor[tid] -= learning_rate * bias_m1_hat / (sqrt(bias_m2_hat) + eps)
-
-                adams_bias_m1_tensor[tid] = bias_m1_new
-                adams_bias_m2_tensor[tid] = bias_m2_new
-
-            if tid < M * N:
-                weight_update: SIMDFloat32 = 0
-                var i = tid // N
-                var j = tid %  N
-
-                for path in range(num_paths):
-                    for step in range(1, steps):
-                         weight_update += in_tensor[j, step, path] * upstream_tensor[i, step, path] * activation_grad_fn(out_tensor[i, step, path])
-
-                weight_m1_old = adams_weight_m1_tensor[i, j]
-                weight_m2_old = adams_weight_m2_tensor[i, j]
-
-                weight_m1_new = beta1 * weight_m1_old + (1 - beta1) * weight_update
-                weight_m2_new = beta2 * weight_m2_old + (1 - beta2) * weight_update * weight_update
-
-                weight_m1_hat = weight_m1_new / (1 - pow(beta1, counter))
-                weight_m2_hat = weight_m2_new / (1 - pow(beta2, counter))
-
-                weight_tensor[i, j] -= learning_rate * weight_decay * weight_tensor[i, j]
-                weight_tensor[i, j] -= learning_rate * weight_m1_hat / (sqrt(weight_m2_hat) + eps)
-
-                adams_weight_m1_tensor[i, j] = weight_m1_new
-                adams_weight_m2_tensor[i, j] = weight_m2_new
-
-            # Downstream
-            if tid < num_paths:
-                for i in range(N):
-                    for step in range(steps - 1):
-                        value: SIMDFloat32 = 0
-                        for j in range(M):
-                            value += weight_tensor[j, i] * upstream_tensor[j, step, tid] * activation_grad_fn(out_tensor[j, step, tid])
-                        downstream_tensor[i, step, tid] = value
-
-        self.ctx.enqueue_function_checked[apply_grad_kernel, apply_grad_kernel](
-            self.weight_tensor,
-            self.adams_weight_m1_tensor,
-            self.adams_weight_m2_tensor,
-            self.bias_tensor,
-            self.adams_bias_m1_tensor,
-            self.adams_bias_m2_tensor,
-            self.in_tensor,
-            self.out_tensor,
-            upstream_tensor,
-            self.grad_tensor,
-            self.counter,
-            self.learning_rate,
-            self.beta1,
-            self.beta2,
-            self.eps,
-            self.weight_decay,
-            grid_dim=(1),
-            block_dim=(num_paths),
-        )
-        self.ctx.synchronize()
-        self.counter += 1
-
-    fn apply_grad_fast(mut self, upstream_tensor: Self.OutTensorType) raises:
 
         fn downstream_kernel(
             weight_tensor:          Self.WeightTensorType,
@@ -536,11 +434,11 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
             result_tensor[0] = 0
 
-            var value: SIMDFloat32
+            var value: Float32 
             for i in range(num_paths):
                 value = 0
                 for j in range(1, steps):
-                    value += input_tensor[2, j, i] * (input_tensor[1, j, i] - input_tensor[1, j - 1, i])
+                    value += input_tensor[2, j, i][0] * (input_tensor[1, j, i] - input_tensor[1, j - 1, i])[0]
 
                 payoff = max(input_tensor[1, steps - 1, i] - strike, 0)
                 result_tensor[0] += (value - payoff) ** 2
@@ -569,14 +467,14 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
             if tid > 0:
                 return
 
-            var value: SIMDFloat32
+            var value: Float32
 
             for i in range(num_paths):
 
                 value = 0
 
                 for j in range(steps - 1):
-                    value += input_tensor[2, j + 1, i] * (input_tensor[1, j + 1, i] - input_tensor[1, j, i])
+                    value += input_tensor[2, j + 1, i] [0]* (input_tensor[1, j + 1, i][0] - input_tensor[1, j, i])[0]
 
                 payoff = max(input_tensor[1, steps - 1, i] - strike, 0)
                 grad_tensor[0, steps, i] = 0
@@ -716,9 +614,9 @@ fn main() raises:
         loss.apply_grad(layer_1.in_tensor)
 
         for step in reversed(range(steps - 1)):
-            layer_3.apply_grad_fast(loss.grad_tensor)
-            layer_2.apply_grad_fast(layer_3.grad_tensor)
-            layer_1.apply_grad_fast(layer_2.grad_tensor)
+            layer_3.apply_grad(loss.grad_tensor)
+            layer_2.apply_grad(layer_3.grad_tensor)
+            layer_1.apply_grad(layer_2.grad_tensor)
 
             ctx.enqueue_function[update_loss_grad_kernel[inputs, steps, num_paths]](
                 loss.grad_tensor,
