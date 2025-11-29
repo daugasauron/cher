@@ -622,10 +622,10 @@ fn update_loss_grad_kernel[num_inputs: Int, steps: Int, num_paths: Int](
     if tid > 0:
         return
 
-    for i in range(0, steps):
+    for i in range(steps):
         for j in range(num_paths):
-            if i < step:
-                grad_tensor[0, i, j] = input_tensor[2, i, j]
+            if i <= step:
+                grad_tensor[0, i, j] = input_tensor[2, i + 1, j]
             else:
                 grad_tensor[0, i, j] = 0.0
 
@@ -699,10 +699,8 @@ fn main() raises:
         for step in range(steps - 1):
             layer_1.apply(step)
             layer_1.feed_next(layer_2.in_tensor, step)
-
             layer_2.apply(step)
             layer_2.feed_next(layer_3.in_tensor, step)
-
             layer_3.apply(step)
 
             ctx.enqueue_function[recurrent_kernel[inputs, network_size, steps, num_paths]](
@@ -715,10 +713,9 @@ fn main() raises:
             ctx.synchronize()
 
         loss.apply(layer_1.in_tensor)
-
         loss.apply_grad(layer_1.in_tensor)
 
-        for step in reversed(range(1, steps)):
+        for step in reversed(range(steps - 1)):
             layer_3.apply_grad_fast(loss.grad_tensor)
             layer_2.apply_grad_fast(layer_3.grad_tensor)
             layer_1.apply_grad_fast(layer_2.grad_tensor)
@@ -742,6 +739,8 @@ fn main() raises:
             layer_1.print_input(3)
             layer_1.print_input(4)
             layer_1.print_input(5)
+            layer_1.print_input(6)
+            layer_1.print_input(7)
 
             t = yeah('batch', t)
 
