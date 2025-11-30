@@ -1,53 +1,20 @@
-from layout.layout_tensor import Layout, LayoutTensor, IntTuple
+from layout.layout_tensor import Layout, LayoutTensor
 from gpu.host import DeviceContext, DeviceBuffer, DeviceAttribute, HostBuffer
-from gpu.memory import AddressSpace
 from gpu.cluster import cluster_arrive, cluster_wait
-from gpu import block_dim, block_idx, thread_idx, barrier, block
-from os import Atomic
+from gpu import block_dim, block_idx, thread_idx, block
+from math import sqrt
 from he_init import he_init
-from math import sqrt, tanh
-from time import monotonic
-from random import randn_float64, seed
-from utils.numerics import isfinite
 from print_utils import print_matrix_2, print_matrix_3, print_matrix_special
+from activation import Activation, ReluActivation, TanhActivation
 
 alias TPB = 1024
 
-fn init_paths[num_inputs: Int, steps: Int, num_paths: Int](
-    init_tensor:  LayoutTensor[DType.float32, Layout.row_major(steps,      num_paths, 2),         MutableAnyOrigin],
-    input_tensor: LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps,     num_paths), MutableAnyOrigin],
-):
-    var tid = block_idx.x * block_dim.x + thread_idx.x
-
-    if tid >= num_paths:
-        return
-
-    for i in range(steps):
-        input_tensor[0, i, tid] = init_tensor[i, tid, 0]
-        input_tensor[1, i, tid] = init_tensor[i, tid, 1]
-
-
-fn recurrent_kernel[input_size: Int, network_size: Int, steps: Int, num_paths: Int](
-    output_tensor: LayoutTensor[DType.float32, Layout.row_major(1,          steps, num_paths), MutableAnyOrigin],
-    input_tensor:  LayoutTensor[DType.float32, Layout.row_major(input_size, steps, num_paths), MutableAnyOrigin],
-    step: Int
-):
-    var tid = block_idx.x * block_dim.x + thread_idx.x
-
-    if tid >= num_paths:
-        return
-
-    for i in range(num_paths):
-        input_tensor[2, step + 1, tid] = output_tensor[0, step, tid]
-
-
 struct DenseLayer[
-        M:                  Int, 
-        N:                  Int, 
-        steps:              Int, 
-        num_paths:          Int,
-        activation_fn:      fn[width: Int](SIMD[DType.float32, width]) -> SIMD[DType.float32, width],
-        activation_grad_fn: fn[width: Int](SIMD[DType.float32, width]) -> SIMD[DType.float32, width],
+        M:          Int, 
+        N:          Int, 
+        steps:      Int, 
+        num_paths:  Int,
+        activation: Activation,
 ]:
 
     alias weight_layout:  Layout = Layout.row_major(M, N)
@@ -189,7 +156,7 @@ struct DenseLayer[
                     value += weight_tensor[i, j][0] * in_tensor[j, step, tid][0]
 
                 value += bias_tensor[i][0]
-                value = activation_fn(value)
+                value = activation.apply(value)
 
                 out_tensor[i, step, tid] = value
 
@@ -218,7 +185,7 @@ struct DenseLayer[
 
             value: Float32 = 0
             for i in range(M):
-                value += weight_tensor[i, j][0] * upstream_tensor[i, step, path][0] * activation_grad_fn(out_tensor[i, step, path])[0]
+                value += weight_tensor[i, j][0] * upstream_tensor[i, step, path][0] * activation.apply_grad(out_tensor[i, step, path][0])
             downstream_tensor[j, step, path] = value
 
         fn path_sum_kernel(
@@ -235,7 +202,7 @@ struct DenseLayer[
             step = block_idx.z + 1
             path = thread_idx.x
 
-            bias_update:   Float32 = upstream_tensor[i, step, path][0] * activation_grad_fn(out_tensor[i, step, path])[0]
+            bias_update:   Float32 = upstream_tensor[i, step, path][0] * activation.apply_grad(out_tensor[i, step, path][0])
             weight_update: Float32 = in_tensor[j, step, path][0] * bias_update
 
             weight_temp_tensor[i, j, step - 1] = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](weight_update))
@@ -365,281 +332,20 @@ struct DenseLayer[
             input_tensor:  Self.OutTensorType,
             step: Int
         ):
-            var tid = block_idx.x * block_dim.x + thread_idx.x
+            path = thread_idx.x
+            i = block_idx.x
 
-            if tid >= M:
+            if path >= num_paths or i >= M:
                 return
 
-            for i in range(num_paths):
-                input_tensor[tid, step, i] = output_tensor[tid, step, i]
+            input_tensor[i, step, path] = output_tensor[i, step, path]
 
         self.ctx.enqueue_function_checked[feed_next_kernel, feed_next_kernel](
-            self.out_tensor,
-            next_in_tensor,
-            step,
-            grid_dim=(1),
-            block_dim=(M),
-        )
-        self.ctx.synchronize()
-
-
-struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
-
-    var ctx: DeviceContext
-
-    alias ResultTensorType = LayoutTensor[DType.float32, Layout.row_major(1),                            MutableAnyOrigin]
-    alias GradTensorType   = LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths),          MutableAnyOrigin]
-    alias InputTensorType  = LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutableAnyOrigin] 
-
-    var result_buffer: DeviceBuffer[DType.float32]
-    var grad_buffer:   DeviceBuffer[DType.float32]
-
-    var result_tensor: Self.ResultTensorType
-    var grad_tensor:   Self.GradTensorType
-
-    var strike: Float32
-
-    fn __init__(out self, ctx: DeviceContext, strike: Float32) raises:
-        self.ctx = ctx
-        self.strike = strike
-        self.result_buffer = ctx.enqueue_create_buffer[DType.float32](1)
-        self.grad_buffer   = ctx.enqueue_create_buffer[DType.float32](1 * steps * num_paths)
-        self.result_tensor = Self.ResultTensorType(self.result_buffer)
-        self.grad_tensor   = Self.GradTensorType(self.grad_buffer)
-
-    fn print_loss(self) raises:
-        print()
-        print('==== loss  ====')
-        print_matrix_2[1, 1](self.ctx, self.result_buffer)
-
-    fn print_grad(self) raises:
-        print()
-        print('==== loss grad ====')
-        print_matrix_special[1, steps, num_paths](self.ctx, self.grad_buffer)
-
-    fn apply[layout: Layout](
-            self, 
-            input_tensor: LayoutTensor[DType.float32, layout, MutableAnyOrigin]
-    ) raises:
-
-        fn european_call_loss_kernel(
-            input_tensor:  Self.InputTensorType,
-            result_tensor: Self.ResultTensorType,
-            strike: Float32,
-        ):
-            var tid = block_idx.x * block_dim.x + thread_idx.x
-
-            if tid > 0:
-                return
-
-            result_tensor[0] = 0
-
-            var value: Float32 
-            for i in range(num_paths):
-                value = 0
-                for j in range(1, steps):
-                    value += input_tensor[2, j, i][0] * (input_tensor[1, j, i] - input_tensor[1, j - 1, i])[0]
-
-                payoff = max(input_tensor[1, steps - 1, i] - strike, 0)
-                result_tensor[0] += (value - payoff) ** 2
-
-        self.ctx.enqueue_function_checked[european_call_loss_kernel, european_call_loss_kernel](
-            input_tensor,
-            self.result_tensor,
-            self.strike,
-            grid_dim=(1),
-            block_dim=(1),
-        )
-        self.ctx.synchronize()
-
-    fn apply_grad(
-            self,
-            input_tensor: Self.InputTensorType,
-    ) raises:
-
-        fn european_call_grad_kernel(
-            input_tensor: Self.InputTensorType,
-            grad_tensor:  Self.GradTensorType,
-            strike:       Float32,
-        ):
-            var tid = block_idx.x * block_dim.x + thread_idx.x
-
-            if tid > 0:
-                return
-
-            var value: Float32
-
-            for i in range(num_paths):
-
-                value = 0
-
-                for j in range(steps - 1):
-                    value += input_tensor[2, j + 1, i] [0]* (input_tensor[1, j + 1, i][0] - input_tensor[1, j, i])[0]
-
-                payoff = max(input_tensor[1, steps - 1, i] - strike, 0)
-                grad_tensor[0, steps, i] = 0
-                for j in range(steps - 1):
-                    grad_tensor[0, j, i] = 2 * (value - payoff) * (input_tensor[1, j + 1, i] - input_tensor[1, j, i])
-
-        self.ctx.enqueue_function_checked[european_call_grad_kernel, european_call_grad_kernel](
-            input_tensor,
-            self.grad_tensor,
-            self.strike,
-            grid_dim=(1),
-            block_dim=(1),
-        )
-        self.ctx.synchronize()
-
-
-fn relu_act[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
-    return max(y, 0)
-
-
-fn relu_act_grad[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
-    if y > 0:
-        return 1
-    else:
-        return 0
-
-
-fn tanh_act[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
-    return tanh(y)
-
-
-fn tanh_act_grad[width: Int](y: SIMD[DType.float32, width]) -> SIMD[DType.float32, width]:
-    return 1 - y ** 2
-
-
-fn update_loss_grad_kernel[num_inputs: Int, steps: Int, num_paths: Int](
-    grad_tensor:  LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths),          MutableAnyOrigin],
-    input_tensor: LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutableAnyOrigin],
-    step:         Int,
-):
-    var tid = block_idx.x * block_dim.x + thread_idx.x
-
-    if tid > 0:
-        return
-
-    for i in range(steps):
-        for j in range(num_paths):
-            if i <= step:
-                grad_tensor[0, i, j] = input_tensor[2, i + 1, j]
-            else:
-                grad_tensor[0, i, j] = 0.0
-
-fn yeah(msg: String, time: UInt) -> UInt:
-    var t = monotonic()
-    print(msg, 'elapsed (ms):', (t - time) / 1_000_000)
-    return t
-
-fn main() raises:
-    ctx = DeviceContext()
-
-    print('Runnint on', ctx.name())
-    print('MULTIPROCESSOR_COUNT                ', ctx.get_attribute(DeviceAttribute.MULTIPROCESSOR_COUNT))
-    print('MAX_BLOCKS_PER_MULTIPROCESSOR       ', ctx.get_attribute(DeviceAttribute.MAX_BLOCKS_PER_MULTIPROCESSOR))
-    print('MAX_THREADS_PER_BLOCK               ', ctx.get_attribute(DeviceAttribute.MAX_THREADS_PER_BLOCK))
-    print('WARP_SIZE                           ', ctx.get_attribute(DeviceAttribute.WARP_SIZE))
-    print('MAX_SHARED_MEMORY_PER_BLOCK         ', ctx.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_BLOCK))
-    print('MAX_SHARED_MEMORY_PER_MULTIPROCESSOR', ctx.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_MULTIPROCESSOR))
-    print()
-
-    alias inputs       = 3
-    alias steps        = 20
-    alias network_size = 16
-    alias num_paths    = 1024
-
-    var learning_rate: Float32 = 1e-4
-    var beta1:         Float32 = 0.9
-    var beta2:         Float32 = 0.999
-    var eps:           Float32 = 10e-8
-    var weight_decay:  Float32 = 0.01
-
-    layer_1 = DenseLayer[network_size, inputs,       steps, num_paths, relu_act, relu_act_grad](ctx, 'layer 1', learning_rate, beta1, beta2, eps, weight_decay)
-    layer_2 = DenseLayer[network_size, network_size, steps, num_paths, relu_act, relu_act_grad](ctx, 'layer 2', learning_rate, beta1, beta2, eps, weight_decay)
-    layer_3 = DenseLayer[1,            network_size, steps, num_paths, tanh_act, tanh_act_grad](ctx, 'layer 3', learning_rate, beta1, beta2, eps, weight_decay)
-    loss    = EuropeanCallLoss[inputs, steps, num_paths](ctx, 1.05)
-
-    var host_init_buffer   = ctx.enqueue_create_host_buffer[DType.float32](num_paths * steps * 2)
-    var device_init_buffer = ctx.enqueue_create_buffer[DType.float32](num_paths * steps * 2)
-
-    var host_init_tensor   = LayoutTensor[DType.float32, Layout.row_major(steps, num_paths, 2), MutableAnyOrigin](host_init_buffer)
-    var device_init_tensor = LayoutTensor[DType.float32, Layout.row_major(steps, num_paths, 2), MutableAnyOrigin](device_init_buffer)
-
-    var step: Float32 = 1.0 / Float32(steps - 1)
-
-    # Init first step
-    for i in range(num_paths):
-        host_init_tensor[0, i, 0] = 1
-        host_init_tensor[0, i, 1] = 1
-
-    seed(42)
-
-    for i in range(num_paths):
-        for j in range(1, steps):
-            host_init_tensor[j, i, 0] = 1.0 - step * Float32(j)
-            host_init_tensor[j, i, 1] = host_init_tensor[j - 1, i, 1] * (1 + Float32(randn_float64(0, 0.05)))
-
-    ctx.enqueue_copy(dst_buf=device_init_buffer, src_buf=host_init_buffer)
-    ctx.synchronize()
-
-    ctx.enqueue_function[init_paths[inputs, steps, num_paths]](
-        device_init_tensor,
-        layer_1.in_tensor,
-        grid_dim=(1),
-        block_dim=(num_paths),
-    )
-    ctx.synchronize()
-
-    var t = monotonic()
-    for batch in range(1_000_000):
-
-        for step in range(steps - 1):
-            layer_1.apply(step)
-            layer_1.feed_next(layer_2.in_tensor, step)
-            layer_2.apply(step)
-            layer_2.feed_next(layer_3.in_tensor, step)
-            layer_3.apply(step)
-
-            ctx.enqueue_function[recurrent_kernel[inputs, network_size, steps, num_paths]](
-                layer_3.out_tensor,
-                layer_1.in_tensor,
+                self.out_tensor,
+                next_in_tensor,
                 step,
-                grid_dim=(1),
+                grid_dim=(M),
                 block_dim=(num_paths),
-            )
-            ctx.synchronize()
-
-        loss.apply(layer_1.in_tensor)
-        loss.apply_grad(layer_1.in_tensor)
-
-        for step in reversed(range(steps - 1)):
-            layer_3.apply_grad(loss.grad_tensor)
-            layer_2.apply_grad(layer_3.grad_tensor)
-            layer_1.apply_grad(layer_2.grad_tensor)
-
-            ctx.enqueue_function[update_loss_grad_kernel[inputs, steps, num_paths]](
-                loss.grad_tensor,
-                layer_1.grad_tensor,
-                step,
-                grid_dim=(1),
-                block_dim=(1),
-            )
-            ctx.synchronize()
-
-        if batch % 100 == 0:
-            print('batch', batch)
-            loss.print_loss()
-
-            layer_1.print_input(0)
-            layer_1.print_input(1)
-            layer_1.print_input(2)
-            layer_1.print_input(3)
-            layer_1.print_input(4)
-            layer_1.print_input(5)
-            layer_1.print_input(6)
-            layer_1.print_input(7)
-
-            t = yeah('batch', t)
-
+        )
+        self.ctx.synchronize()
 
