@@ -1,6 +1,5 @@
 from layout.layout_tensor import Layout, LayoutTensor
 from gpu.host import DeviceContext, DeviceBuffer, DeviceAttribute, HostBuffer
-from gpu.cluster import cluster_arrive, cluster_wait
 from gpu import block_dim, block_idx, thread_idx, block
 from math import sqrt
 from he_init import he_init
@@ -235,9 +234,6 @@ struct DenseLayer[
 
             weight_update = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](weight_update_t))
             bias_update   = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](bias_update_t))
-
-            cluster_arrive()
-            cluster_wait()
 
             weight_m1_old = adams_weight_m1_tensor[i, j]
             weight_m2_old = adams_weight_m2_tensor[i, j]

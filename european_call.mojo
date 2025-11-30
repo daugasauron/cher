@@ -9,7 +9,7 @@ from time import monotonic
 from gpu.random import NormalRandom
 from print_utils import print_matrix_2, print_matrix_3, print_matrix_special
 from he_init import he_init
-from layer import DenseLayer
+from layer import DenseLayer, TPB
 from activation import ReluActivation, TanhActivation
 
 
@@ -57,28 +57,32 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
                 result_tensor: Self.ResultTensorType,
                 strike: Float32,
         ):
-            var tid = block_idx.x * block_dim.x + thread_idx.x
+            path = thread_idx.x
 
-            if tid > 0:
+            if path >= num_paths:
                 return
 
-            result_tensor[0] = 0
+            value: Float32 = 0
+            for step in range(1, steps):
+                value += input_tensor[2, step, path][0] * (input_tensor[1, step, path] - input_tensor[1, step - 1, path])[0]
 
-            var value: Float32 
-            for i in range(num_paths):
-                value = 0
-                for j in range(1, steps):
-                    value += input_tensor[2, j, i][0] * (input_tensor[1, j, i] - input_tensor[1, j - 1, i])[0]
+            payoff: Float32 = max(input_tensor[1, steps - 1, path][0] - strike, 0)
+            error:  Float32 = (value - payoff) ** 2
 
-                payoff = max(input_tensor[1, steps - 1, i] - strike, 0)
-                result_tensor[0] += (value - payoff) ** 2
+            total_error = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](error))
+
+            cluster_arrive()
+            cluster_wait()
+
+            if thread_idx.x == 0:
+                result_tensor[0] = total_error
 
         self.ctx.enqueue_function_checked[european_call_loss_kernel, european_call_loss_kernel](
                 input_tensor,
                 self.result_tensor,
                 self.strike,
                 grid_dim=(1),
-                block_dim=(1),
+                block_dim=(num_paths),
         )
         self.ctx.synchronize()
 
@@ -92,31 +96,31 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
                 grad_tensor:  Self.GradTensorType,
                 strike:       Float32,
         ):
-            var tid = block_idx.x * block_dim.x + thread_idx.x
+            path = thread_idx.x
 
-            if tid > 0:
+            if path >= num_paths:
                 return
 
-            var value: Float32
+            value: Float32 = 0
 
-            for i in range(num_paths):
-                value = 0
-                for j in range(steps - 1):
-                    value += input_tensor[2, j + 1, i] [0]* (input_tensor[1, j + 1, i][0] - input_tensor[1, j, i])[0]
+            for step in range(steps - 1):
+                value += input_tensor[2, step + 1, path] [0]* (input_tensor[1, step + 1, path][0] - input_tensor[1, step, path])[0]
 
-                payoff = max(input_tensor[1, steps - 1, i] - strike, 0)
-                grad_tensor[0, steps, i] = 0
-                for j in range(steps - 1):
-                    grad_tensor[0, j, i] = 2 * (value - payoff) * (input_tensor[1, j + 1, i] - input_tensor[1, j, i])
+            payoff = max(input_tensor[1, steps - 1, path] - strike, 0)
+            grad_tensor[0, steps, path] = 0
+
+            for step in range(steps - 1):
+                grad_tensor[0, step, path] = 2 * (value - payoff) * (input_tensor[1, step + 1, path] - input_tensor[1, step, path])
 
         self.ctx.enqueue_function_checked[european_call_grad_kernel, european_call_grad_kernel](
                 input_tensor,
                 self.grad_tensor,
                 self.strike,
                 grid_dim=(1),
-                block_dim=(1),
+                block_dim=(num_paths),
         )
         self.ctx.synchronize()
+
 
 fn generate_paths[num_inputs: Int, steps: Int, num_paths: Int](
         ctx: DeviceContext,
@@ -165,6 +169,7 @@ fn generate_paths[num_inputs: Int, steps: Int, num_paths: Int](
             block_dim=(num_paths),
     )
     ctx.synchronize()
+
 
 fn next_step[input_size: Int, steps: Int, num_paths: Int](
         ctx: DeviceContext,
@@ -278,7 +283,7 @@ fn main() raises:
 
             update_loss_grad[inputs, steps, num_paths](ctx, loss.grad_tensor, layer_1.grad_tensor, step)
 
-        if batch % 1_000 == 0:
+        if batch % 100 == 0:
             print('batch', batch)
             loss.print_loss()
 
