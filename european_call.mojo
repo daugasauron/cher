@@ -1,12 +1,12 @@
+from python import Python
 from layout.layout_tensor import Layout, LayoutTensor, IntTuple
 from gpu.host import DeviceContext, DeviceBuffer, DeviceAttribute, HostBuffer
 from gpu.memory import AddressSpace
 from gpu.cluster import cluster_arrive, cluster_wait
 from gpu import block_dim, block_idx, thread_idx, barrier, block
-from os import Atomic
 from math import sqrt, tanh, exp
-from time import monotonic
 from gpu.random import NormalRandom
+from time import monotonic
 from print_utils import print_matrix_2, print_matrix_3, print_matrix_special
 from he_init import he_init
 from layer import DenseLayer, TPB
@@ -36,6 +36,15 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
         self.grad_buffer   = ctx.enqueue_create_buffer[DType.float32](1 * steps * num_paths)
         self.result_tensor = Self.ResultTensorType(self.result_buffer)
         self.grad_tensor   = Self.GradTensorType(self.grad_buffer)
+
+    fn value(self) raises -> Float32:
+        host_buffer = self.ctx.enqueue_create_host_buffer[DType.float32](1)
+        host_tensor = LayoutTensor[DType.float32, Layout.row_major(1), MutableAnyOrigin](host_buffer)
+
+        self.ctx.enqueue_copy(dst_buf=host_buffer, src_buf=self.result_buffer)
+        self.ctx.synchronize()
+
+        return host_tensor[0][0]
 
     fn print_loss(self) raises:
         print()
@@ -249,20 +258,35 @@ fn main() raises:
     alias network_size = 16
     alias num_paths    = 1024
 
-    learning_rate: Float32 = 1e-4
+    learning_rate: Float32 = 1e-3
     beta1:         Float32 = 0.9
     beta2:         Float32 = 0.999
     eps:           Float32 = 10e-8
     weight_decay:  Float32 = 0.01
 
+    drift:  Float32 = 0
+    vol:    Float32 = 0.2
+    strike: Float32 = 1.2
+
     layer_1 = DenseLayer[network_size, inputs,       steps, num_paths, ReluActivation](ctx, 'layer 1', learning_rate, beta1, beta2, eps, weight_decay)
     layer_2 = DenseLayer[network_size, network_size, steps, num_paths, ReluActivation](ctx, 'layer 2', learning_rate, beta1, beta2, eps, weight_decay)
     layer_3 = DenseLayer[1,            network_size, steps, num_paths, TanhActivation](ctx, 'layer 3', learning_rate, beta1, beta2, eps, weight_decay)
-    loss    = EuropeanCallLoss[inputs, steps, num_paths](ctx, 1.05)
+    loss    = EuropeanCallLoss[inputs, steps, num_paths](ctx, strike)
 
-    t = monotonic()
-    for batch in range(1_000_000):
-        generate_paths[inputs, steps, num_paths](ctx, layer_1.in_tensor, 0, 0.2, batch)
+    pyray = Python.import_module('pyray')
+    pyray.init_window(1260, 750, 'deep hedning')
+    batch = 0
+
+    test_path_buffer = ctx.enqueue_create_host_buffer[DType.float32](inputs * steps * num_paths)
+    test_path_tensor = LayoutTensor[DType.float32, Layout.row_major(inputs, steps, num_paths), MutableAnyOrigin](test_path_buffer)
+
+    start_time = monotonic()
+
+    while not pyray.window_should_close():
+        pyray.begin_drawing()
+        pyray.clear_background(pyray.BLACK)
+
+        generate_paths[inputs, steps, num_paths](ctx, layer_1.in_tensor, drift, vol, batch)
 
         for step in range(steps - 1):
             layer_1.apply(step)
@@ -283,16 +307,123 @@ fn main() raises:
 
             update_loss_grad[inputs, steps, num_paths](ctx, loss.grad_tensor, layer_1.grad_tensor, step)
 
-        if batch % 100 == 0:
-            print('batch', batch)
-            loss.print_loss()
 
-            layer_1.print_input(0)
-            layer_1.print_input(1)
-            layer_1.print_input(2)
-            layer_1.print_input(3)
-            layer_1.print_input(4)
-            layer_1.print_input(5)
-            layer_1.print_input(6)
-            layer_1.print_input(7)
+        # Draw stuff
+        if batch % 200 == 0:
 
+            margin = 10
+
+            # Text
+            batch_message = 'batch: ' + String(batch)
+            pyray.draw_text(batch_message, margin, margin, 20, pyray.GRAY)
+
+            loss_message = 'loss: ' + String(loss.value())
+            pyray.draw_text(loss_message, margin + 200, margin, 20, pyray.GRAY)
+
+            elapsed_seconds = (monotonic() - start_time) // 1_000_000_000
+            elapsed_message = 'time (seconds): ' + String(elapsed_seconds)
+            pyray.draw_text(elapsed_message, margin + 400, margin, 20, pyray.GRAY)
+
+            # Test paths
+            test_paths = 9
+
+            offset = 40
+            plot_height = 220
+            plot_width  = 400
+
+            test_path_seed = 42
+            generate_paths[inputs, steps, num_paths](ctx, layer_1.in_tensor, drift, vol, test_path_seed)
+
+            for step in range(steps - 1):
+                layer_1.apply(step)
+                layer_1.feed_next(layer_2.in_tensor, step)
+                layer_2.apply(step)
+                layer_2.feed_next(layer_3.in_tensor, step)
+                layer_3.apply(step)
+
+                next_step[inputs, steps, num_paths](ctx, layer_3.out_tensor, layer_1.in_tensor, step)
+
+            ctx.enqueue_copy(dst_buf=test_path_buffer, src_buf=layer_1.in_buffer)
+            ctx.synchronize()
+
+            for test_path in range(test_paths):
+                y_offset = (test_path % 3)  * (plot_height + 2 * margin)
+                x_offset = (test_path // 3) * (plot_width + 2 * margin)
+
+                # Vertical
+                pyray.draw_line(
+                        margin + x_offset, 
+                        offset + y_offset,
+                        margin + x_offset, 
+                        offset + y_offset + plot_height, 
+                        pyray.GRAY
+                )
+                pyray.draw_line(
+                        margin + x_offset +plot_width, 
+                        offset + y_offset, 
+                        margin + x_offset + plot_width, 
+                        offset + y_offset + plot_height, 
+                        pyray.GRAY
+                )
+
+                # Horizontal
+                pyray.draw_line(
+                        margin + x_offset, 
+                        offset + y_offset, 
+                        margin + x_offset + plot_width, 
+                        offset + y_offset, 
+                        pyray.GRAY
+                )
+                pyray.draw_line(
+                        margin + x_offset, 
+                        offset + y_offset + plot_height // 2, 
+                        margin + x_offset + plot_width, 
+                        offset + y_offset + plot_height // 2, 
+                        pyray.GRAY
+                )
+                pyray.draw_line(
+                        margin + x_offset, 
+                        offset + y_offset + plot_height, 
+                        margin + x_offset + plot_width, 
+                        offset + y_offset + plot_height, 
+                        pyray.GRAY
+                )
+
+                y_mid:   Int     = offset + y_offset + plot_height // 2
+                y_scale: Float32 = Float32(plot_height / 2)
+                dx:      Float32 = Float32(plot_width / (steps - 2))
+
+                # Strike
+                pyray.draw_line(
+                        margin + x_offset, 
+                        y_mid - Int((strike - 1) * y_scale), 
+                        margin + x_offset + plot_width, 
+                        y_mid - Int((strike - 1) * y_scale), 
+                        pyray.RED,
+                )
+
+                for step in range(steps - 2):
+
+                    # Hedge
+                    pyray.draw_line(
+                            margin + x_offset + Int(dx * step), 
+                            y_mid - Int(test_path_tensor[2, step + 1, test_path][0] * y_scale), 
+                            margin + x_offset + Int(dx * (step + 1)), 
+                            y_mid - Int(test_path_tensor[2, step + 2, test_path][0] * y_scale), 
+                            pyray.ORANGE,
+                    )
+
+                    #Stock
+                    pyray.draw_line(
+                            margin + x_offset + Int(dx * step), 
+                            y_mid - Int((test_path_tensor[1, step, test_path][0] - 1) * y_scale), 
+                            margin + x_offset + Int(dx * (step + 1)), 
+                            y_mid - Int((test_path_tensor[1, step + 1, test_path][0] - 1) * y_scale), 
+                            pyray.BLUE,
+                    )
+
+            pyray.end_drawing()
+
+        batch += 1
+
+    pyray.close_window()

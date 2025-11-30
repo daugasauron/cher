@@ -1,5 +1,6 @@
 from layout.layout_tensor import Layout, LayoutTensor
 from gpu.host import DeviceContext, DeviceBuffer, DeviceAttribute, HostBuffer
+from gpu.cluster import cluster_arrive, cluster_wait
 from gpu import block_dim, block_idx, thread_idx, block
 from math import sqrt
 from he_init import he_init
@@ -235,6 +236,11 @@ struct DenseLayer[
             weight_update = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](weight_update_t))
             bias_update   = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](bias_update_t))
 
+            cluster_arrive()
+            cluster_wait()
+
+            decayed_learning_rate  = learning_rate * Float32(pow(0.99, counter / 10_000))
+
             weight_m1_old = adams_weight_m1_tensor[i, j]
             weight_m2_old = adams_weight_m2_tensor[i, j]
 
@@ -244,8 +250,8 @@ struct DenseLayer[
             weight_m1_hat = weight_m1_new / (1 - pow(beta1, counter))
             weight_m2_hat = weight_m2_new / (1 - pow(beta2, counter))
 
-            weight_tensor[i, j] -= learning_rate * weight_decay * weight_tensor[i, j]
-            weight_tensor[i, j] -= learning_rate * weight_m1_hat / (sqrt(weight_m2_hat) + eps)
+            weight_tensor[i, j] -= decayed_learning_rate * weight_decay * weight_tensor[i, j]
+            weight_tensor[i, j] -= decayed_learning_rate * weight_m1_hat / (sqrt(weight_m2_hat) + eps)
 
             adams_weight_m1_tensor[i, j] = weight_m1_new
             adams_weight_m2_tensor[i, j] = weight_m2_new
@@ -260,7 +266,7 @@ struct DenseLayer[
                 m1_hat = m1_new / (1 - pow(beta1, counter))
                 m2_hat = m2_new / (1 - pow(beta2, counter))
 
-                bias_tensor[i] -= learning_rate * m1_hat / (sqrt(m2_hat) + eps)
+                bias_tensor[i] -= decayed_learning_rate * m1_hat / (sqrt(m2_hat) + eps)
 
                 adams_bias_m1_tensor[i] = m1_new
                 adams_bias_m2_tensor[i] = m2_new
