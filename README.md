@@ -13,5 +13,7 @@ European call example
 - blue line:   stock price for this path
 - red line:    option strike
 
+https://www.youtube.com/watch?v=M5RJrDWWYwU
+
 ![Description](screen_1.png)
 ![Description](screen_2.png)
