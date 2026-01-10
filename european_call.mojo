@@ -27,11 +27,13 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
     var result_tensor: Self.ResultTensorType
     var grad_tensor:   Self.GradTensorType
 
-    var strike: Float32
+    var strike:   Float32
+    var slippage: Float32
 
-    fn __init__(out self, ctx: DeviceContext, strike: Float32) raises:
+    fn __init__(out self, ctx: DeviceContext, strike: Float32, slippage: Float32) raises:
         self.ctx = ctx
         self.strike = strike
+        self.slippage = slippage
         self.result_buffer = ctx.enqueue_create_buffer[DType.float32](1)
         self.grad_buffer   = ctx.enqueue_create_buffer[DType.float32](1 * steps * num_paths)
         self.result_tensor = Self.ResultTensorType(self.result_buffer)
@@ -64,7 +66,8 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
         fn european_call_loss_kernel(
                 input_tensor:  Self.InputTensorType,
                 result_tensor: Self.ResultTensorType,
-                strike: Float32,
+                strike:        Float32,
+                slippage:      Float32,
         ):
             path = Int(thread_idx.x)
 
@@ -73,7 +76,10 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
             value: Float32 = 0
             for step in range(1, steps):
-                value += input_tensor[2, step, path][0] * (input_tensor[1, step, path] - input_tensor[1, step - 1, path])[0]
+                value += input_tensor[2, step, path][0] * (
+                            input_tensor[1,     step, path][0] * (1 + slippage) - 
+                            input_tensor[1, step - 1, path][0] * (1 - slippage)
+                        )
 
             payoff: Float32 = max(input_tensor[1, steps - 1, path][0] - strike, 0)
             error:  Float32 = (value - payoff) ** 2
@@ -88,8 +94,9 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
         self.ctx.enqueue_function_checked[european_call_loss_kernel, european_call_loss_kernel](
                 input_tensor,
-               self.result_tensor,
+                self.result_tensor,
                 self.strike,
+                self.slippage,
                 grid_dim=(1),
                 block_dim=(num_paths),
         )
@@ -104,6 +111,7 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
                 input_tensor: Self.InputTensorType,
                 grad_tensor:  Self.GradTensorType,
                 strike:       Float32,
+                slippage:     Float32,
         ):
             path = Int(thread_idx.x)
 
@@ -113,18 +121,25 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
             value: Float32 = 0
 
             for step in range(steps - 1):
-                value += input_tensor[2, step + 1, path] [0]* (input_tensor[1, step + 1, path][0] - input_tensor[1, step, path])[0]
+                value += input_tensor[2, step + 1, path] [0] * (
+                        input_tensor[1, step + 1, path][0] * (1 + slippage) -
+                        input_tensor[1, step    , path][0] * (1 - slippage)
+                    )
 
             payoff = max(input_tensor[1, steps - 1, path] - strike, 0)
             grad_tensor[0, steps, path] = 0
 
             for step in range(steps - 1):
-                grad_tensor[0, step, path] = 2 * (value - payoff) * (input_tensor[1, step + 1, path] - input_tensor[1, step, path])
+                grad_tensor[0, step, path] = 2 * (value - payoff) * (
+                        input_tensor[1, step + 1, path] * (1 + slippage) -
+                        input_tensor[1, step,     path] * (1 - slippage)
+                    )
 
         self.ctx.enqueue_function_checked[european_call_grad_kernel, european_call_grad_kernel](
                 input_tensor,
                 self.grad_tensor,
                 self.strike,
+                self.slippage,
                 grid_dim=(1),
                 block_dim=(num_paths),
         )
@@ -264,14 +279,15 @@ fn main() raises:
     eps:           Float32 = 10e-8
     weight_decay:  Float32 = 0.01
 
-    drift:  Float32 = 0
-    vol:    Float32 = 0.2
-    strike: Float32 = 1.1
+    drift:  Float32   = 0
+    vol:    Float32   = 0.2
+    strike: Float32   = 1.1
+    slippage: Float32 = 0.02
 
     layer_1 = DenseLayer[network_size, inputs,       steps, num_paths, ReluActivation](ctx, 'layer 1', learning_rate, beta1, beta2, eps, weight_decay)
     layer_2 = DenseLayer[network_size, network_size, steps, num_paths, ReluActivation](ctx, 'layer 2', learning_rate, beta1, beta2, eps, weight_decay)
     layer_3 = DenseLayer[1,            network_size, steps, num_paths, TanhActivation](ctx, 'layer 3', learning_rate, beta1, beta2, eps, weight_decay)
-    loss    = EuropeanCallLoss[inputs, steps, num_paths](ctx, strike)
+    loss    = EuropeanCallLoss[inputs, steps, num_paths](ctx, strike, slippage)
 
     pyray = Python.import_module('pyray')
     pyray.init_window(1260, 750, 'deep hedning')
