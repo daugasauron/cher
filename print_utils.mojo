@@ -4,7 +4,7 @@ from gpu.host import DeviceContext, DeviceBuffer
 
 fn print_matrix_2[M: Int, N: Int](ctx: DeviceContext, device_buffer: DeviceBuffer[DType.float32]) raises -> None:
     host_buffer = ctx.enqueue_create_host_buffer[DType.float32](M * N)
-    host_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N), MutableAnyOrigin](host_buffer)
+    host_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N), MutAnyOrigin](host_buffer)
 
     ctx.enqueue_copy(dst_buf=host_buffer, src_buf=device_buffer)
     ctx.synchronize()
@@ -18,7 +18,7 @@ fn print_matrix_2[M: Int, N: Int](ctx: DeviceContext, device_buffer: DeviceBuffe
 
 fn print_matrix_3[M: Int, N: Int, K: Int](ctx: DeviceContext, device_buffer: DeviceBuffer[DType.float32], k: Int) raises -> None:
     host_buffer = ctx.enqueue_create_host_buffer[DType.float32](M * N * K)
-    host_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N, K), MutableAnyOrigin](host_buffer)
+    host_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N, K), MutAnyOrigin](host_buffer)
 
     ctx.enqueue_copy(dst_buf=host_buffer, src_buf=device_buffer)
     ctx.synchronize()
@@ -31,7 +31,7 @@ fn print_matrix_3[M: Int, N: Int, K: Int](ctx: DeviceContext, device_buffer: Dev
 
 fn print_matrix_special[M: Int, N: Int, K: Int](ctx: DeviceContext, device_buffer: DeviceBuffer[DType.float32]) raises -> None:
     host_buffer = ctx.enqueue_create_host_buffer[DType.float32](M * N * K)
-    host_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N, K), MutableAnyOrigin](host_buffer)
+    host_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N, K), MutAnyOrigin](host_buffer)
 
     ctx.enqueue_copy(dst_buf=host_buffer, src_buf=device_buffer)
     ctx.synchronize()

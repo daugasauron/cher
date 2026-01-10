@@ -24,10 +24,10 @@ struct DenseLayer[
     alias in_vec_layout:  Layout = Layout.row_major(N, num_paths)
     alias out_vec_layout: Layout = Layout.row_major(M, num_paths)
 
-    alias WeightTensorType = LayoutTensor[DType.float32, Self.weight_layout,  MutableAnyOrigin]
-    alias BiasTensorType   = LayoutTensor[DType.float32, Self.bias_layout,    MutableAnyOrigin]
-    alias InTensorType     = LayoutTensor[DType.float32, Self.in_layout,      MutableAnyOrigin]
-    alias OutTensorType    = LayoutTensor[DType.float32, Self.out_layout,     MutableAnyOrigin]
+    alias WeightTensorType = LayoutTensor[DType.float32, Self.weight_layout,  MutAnyOrigin]
+    alias BiasTensorType   = LayoutTensor[DType.float32, Self.bias_layout,    MutAnyOrigin]
+    alias InTensorType     = LayoutTensor[DType.float32, Self.in_layout,      MutAnyOrigin]
+    alias OutTensorType    = LayoutTensor[DType.float32, Self.out_layout,     MutAnyOrigin]
 
     alias random_seed: Int = 42
     alias random_size: Int = 4
@@ -103,7 +103,7 @@ struct DenseLayer[
 
         self.counter = 1
 
-        ctx.enqueue_function[he_init[self.weight_layout]](
+        ctx.enqueue_function_checked[he_init[self.weight_layout], he_init[self.weight_layout]](
             self.weight_tensor,
             self.random_seed,
             grid_dim=(1),
@@ -145,7 +145,7 @@ struct DenseLayer[
             out_tensor:    Self.OutTensorType,
             step:          Int,
         ):
-            var tid = block_idx.x * block_dim.x + thread_idx.x
+            var tid = Int(block_idx.x * block_dim.x + thread_idx.x)
 
             if tid >= num_paths:
                 return
@@ -194,8 +194,8 @@ struct DenseLayer[
             in_tensor:              Self.InTensorType,
             out_tensor:             Self.OutTensorType,
             upstream_tensor:        Self.OutTensorType,
-            weight_temp_tensor:     LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutableAnyOrigin],
-            bias_temp_tensor:       LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutableAnyOrigin],
+            weight_temp_tensor:     LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutAnyOrigin],
+            bias_temp_tensor:       LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutAnyOrigin],
         ):
             i    = block_idx.x
             j    = block_idx.y
@@ -217,8 +217,8 @@ struct DenseLayer[
             bias_tensor:            Self.BiasTensorType,
             adams_bias_m1_tensor:   Self.BiasTensorType,
             adams_bias_m2_tensor:   Self.BiasTensorType,
-            weight_temp_tensor:     LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutableAnyOrigin],
-            bias_temp_tensor:       LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutableAnyOrigin],
+            weight_temp_tensor:     LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutAnyOrigin],
+            bias_temp_tensor:       LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutAnyOrigin],
             counter:                Int,
             learning_rate:          Float32,
             beta1:                  Float32,
@@ -275,8 +275,8 @@ struct DenseLayer[
         weight_temp_buffer = self.ctx.enqueue_create_buffer[DType.float32](M * N * steps - 1)
         bias_temp_buffer   = self.ctx.enqueue_create_buffer[DType.float32](M * steps - 1)
 
-        weight_temp_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutableAnyOrigin](weight_temp_buffer)
-        bias_temp_tensor   = LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutableAnyOrigin](bias_temp_buffer)
+        weight_temp_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutAnyOrigin](weight_temp_buffer)
+        bias_temp_tensor   = LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutAnyOrigin](bias_temp_buffer)
 
         self.ctx.enqueue_function_checked[downstream_kernel, downstream_kernel](
             self.weight_tensor,
@@ -334,8 +334,8 @@ struct DenseLayer[
             input_tensor:  Self.OutTensorType,
             step: Int
         ):
-            path = thread_idx.x
-            i = block_idx.x
+            path = Int(thread_idx.x)
+            i = Int(block_idx.x)
 
             if path >= num_paths or i >= M:
                 return

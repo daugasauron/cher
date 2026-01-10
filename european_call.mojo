@@ -5,7 +5,7 @@ from gpu.memory import AddressSpace
 from gpu.cluster import cluster_arrive, cluster_wait
 from gpu import block_dim, block_idx, thread_idx, barrier, block
 from math import sqrt, tanh, exp
-from gpu.random import NormalRandom
+from random import NormalRandom
 from time import monotonic
 from print_utils import print_matrix_2, print_matrix_3, print_matrix_special
 from he_init import he_init
@@ -17,9 +17,9 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
     var ctx: DeviceContext
 
-    alias ResultTensorType = LayoutTensor[DType.float32, Layout.row_major(1),                            MutableAnyOrigin]
-    alias GradTensorType   = LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths),          MutableAnyOrigin]
-    alias InputTensorType  = LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutableAnyOrigin] 
+    alias ResultTensorType = LayoutTensor[DType.float32, Layout.row_major(1),                            MutAnyOrigin]
+    alias GradTensorType   = LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths),          MutAnyOrigin]
+    alias InputTensorType  = LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutAnyOrigin] 
 
     var result_buffer: DeviceBuffer[DType.float32]
     var grad_buffer:   DeviceBuffer[DType.float32]
@@ -39,7 +39,7 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
     fn value(self) raises -> Float32:
         host_buffer = self.ctx.enqueue_create_host_buffer[DType.float32](1)
-        host_tensor = LayoutTensor[DType.float32, Layout.row_major(1), MutableAnyOrigin](host_buffer)
+        host_tensor = LayoutTensor[DType.float32, Layout.row_major(1), MutAnyOrigin](host_buffer)
 
         self.ctx.enqueue_copy(dst_buf=host_buffer, src_buf=self.result_buffer)
         self.ctx.synchronize()
@@ -58,7 +58,7 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
     fn apply[layout: Layout](
             self, 
-            input_tensor: LayoutTensor[DType.float32, layout, MutableAnyOrigin]
+            input_tensor: LayoutTensor[DType.float32, layout, MutAnyOrigin]
     ) raises:
 
         fn european_call_loss_kernel(
@@ -66,7 +66,7 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
                 result_tensor: Self.ResultTensorType,
                 strike: Float32,
         ):
-            path = thread_idx.x
+            path = Int(thread_idx.x)
 
             if path >= num_paths:
                 return
@@ -105,7 +105,7 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
                 grad_tensor:  Self.GradTensorType,
                 strike:       Float32,
         ):
-            path = thread_idx.x
+            path = Int(thread_idx.x)
 
             if path >= num_paths:
                 return
@@ -133,19 +133,19 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
 fn generate_paths[num_inputs: Int, steps: Int, num_paths: Int](
         ctx: DeviceContext,
-        input_tensor: LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutableAnyOrigin],
+        input_tensor: LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutAnyOrigin],
         drift:        Float32,
         vol:          Float32,
         seed:         Int,
 ) raises:
 
     fn generate_paths_kernel(
-            input_tensor: LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutableAnyOrigin],
+            input_tensor: LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutAnyOrigin],
             drift:        Float32,
             vol:          Float32,
             seed:         Int,
     ):
-        path = thread_idx.x
+        path = Int(thread_idx.x)
 
         if path >= num_paths or block_idx.x > 0:
             return
@@ -156,7 +156,7 @@ fn generate_paths[num_inputs: Int, steps: Int, num_paths: Int](
 
         dt = Float32(1.0 / (steps - 1))
 
-        thread_seed = seed * block_dim.x + thread_idx.x
+        thread_seed = seed * Int(block_dim.x + thread_idx.x)
         random = NormalRandom(seed=thread_seed)
 
         for step in range(1, steps):
@@ -182,17 +182,17 @@ fn generate_paths[num_inputs: Int, steps: Int, num_paths: Int](
 
 fn next_step[input_size: Int, steps: Int, num_paths: Int](
         ctx: DeviceContext,
-        output_tensor: LayoutTensor[DType.float32, Layout.row_major(1,          steps, num_paths), MutableAnyOrigin],
-        input_tensor:  LayoutTensor[DType.float32, Layout.row_major(input_size, steps, num_paths), MutableAnyOrigin],
+        output_tensor: LayoutTensor[DType.float32, Layout.row_major(1,          steps, num_paths), MutAnyOrigin],
+        input_tensor:  LayoutTensor[DType.float32, Layout.row_major(input_size, steps, num_paths), MutAnyOrigin],
         step: Int
 ) raises:
 
     fn next_step_kernel(
-        output_tensor: LayoutTensor[DType.float32, Layout.row_major(1,          steps, num_paths), MutableAnyOrigin],
-        input_tensor:  LayoutTensor[DType.float32, Layout.row_major(input_size, steps, num_paths), MutableAnyOrigin],
+        output_tensor: LayoutTensor[DType.float32, Layout.row_major(1,          steps, num_paths), MutAnyOrigin],
+        input_tensor:  LayoutTensor[DType.float32, Layout.row_major(input_size, steps, num_paths), MutAnyOrigin],
         step: Int
     ):
-        path = thread_idx.x
+        path = Int(thread_idx.x)
 
         if path >= num_paths or block_idx.x > 0:
             return
@@ -211,18 +211,18 @@ fn next_step[input_size: Int, steps: Int, num_paths: Int](
 
 fn update_loss_grad[num_inputs: Int, steps: Int, num_paths: Int](
         ctx: DeviceContext,
-        grad_tensor:  LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths),          MutableAnyOrigin],
-        input_tensor: LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutableAnyOrigin],
+        grad_tensor:  LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths),          MutAnyOrigin],
+        input_tensor: LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutAnyOrigin],
         step:         Int,
 ) raises:
 
     fn update_loss_grad_kernel(
-        grad_tensor:  LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths),          MutableAnyOrigin],
-        input_tensor: LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutableAnyOrigin],
+        grad_tensor:  LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths),          MutAnyOrigin],
+        input_tensor: LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutAnyOrigin],
         step:         Int,
     ):
-        path = thread_idx.x
-        step_idx = block_idx.x
+        path = Int(thread_idx.x)
+        step_idx = Int(block_idx.x)
 
         if path >= num_paths or step >= steps:
             return
@@ -278,7 +278,7 @@ fn main() raises:
     batch = 0
 
     test_path_buffer = ctx.enqueue_create_host_buffer[DType.float32](inputs * steps * num_paths)
-    test_path_tensor = LayoutTensor[DType.float32, Layout.row_major(inputs, steps, num_paths), MutableAnyOrigin](test_path_buffer)
+    test_path_tensor = LayoutTensor[DType.float32, Layout.row_major(inputs, steps, num_paths), MutAnyOrigin](test_path_buffer)
 
     start_time = monotonic()
 

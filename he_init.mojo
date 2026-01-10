@@ -5,25 +5,25 @@ from gpu import block_dim, block_idx, thread_idx
 
 
 fn he_init[layout: Layout](
-    tensor: LayoutTensor[DType.float32, layout, MutableAnyOrigin],
+    tensor: LayoutTensor[DType.float32, layout, MutAnyOrigin],
     seed: Int,
 ):
     alias simd_width = 4
-    var M = tensor.dim(0)
-    var N = tensor.dim(1)
-    var size = M * N
-    var draws = (size + simd_width - 1) // simd_width
+    M = tensor.dim(0)
+    N = tensor.dim(1)
+    size = M * N
+    draws = (size + simd_width - 1) // simd_width
 
-    var tid = block_idx.x * block_dim.x + thread_idx.x
+    tid = Int(block_idx.x * block_dim.x + thread_idx.x)
 
     if tid >= draws:
         return
 
-    var thread_seed = seed + tid
-    var random = Random(seed=thread_seed)
-    var uni = random.step_uniform()
+    thread_seed = seed + tid
+    random = Random(seed=thread_seed)
+    uni = random.step_uniform()
 
-    var std_dev = Float32(2.0 / N) ** 0.5
+    std_dev = Float32(2.0 / N) ** 0.5
 
     if tid == draws - 1:
         remainder = size % simd_width
