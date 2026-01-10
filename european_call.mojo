@@ -88,7 +88,7 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
         self.ctx.enqueue_function_checked[european_call_loss_kernel, european_call_loss_kernel](
                 input_tensor,
-                self.result_tensor,
+               self.result_tensor,
                 self.strike,
                 grid_dim=(1),
                 block_dim=(num_paths),
@@ -266,7 +266,7 @@ fn main() raises:
 
     drift:  Float32 = 0
     vol:    Float32 = 0.2
-    strike: Float32 = 1.2
+    strike: Float32 = 1.1
 
     layer_1 = DenseLayer[network_size, inputs,       steps, num_paths, ReluActivation](ctx, 'layer 1', learning_rate, beta1, beta2, eps, weight_decay)
     layer_2 = DenseLayer[network_size, network_size, steps, num_paths, ReluActivation](ctx, 'layer 2', learning_rate, beta1, beta2, eps, weight_decay)
@@ -309,7 +309,7 @@ fn main() raises:
 
 
         # Draw stuff
-        if batch % 200 == 0:
+        if batch % 50 == 0:
 
             margin = 10
 
@@ -331,7 +331,7 @@ fn main() raises:
             plot_height = 220
             plot_width  = 400
 
-            test_path_seed = 42
+            test_path_seed = 1
             generate_paths[inputs, steps, num_paths](ctx, layer_1.in_tensor, drift, vol, test_path_seed)
 
             for step in range(steps - 1):

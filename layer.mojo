@@ -145,20 +145,20 @@ struct DenseLayer[
             out_tensor:    Self.OutTensorType,
             step:          Int,
         ):
-            var tid = Int(block_idx.x * block_dim.x + thread_idx.x)
+            i = Int(block_idx.x)
+            path = Int(thread_idx.x)
 
-            if tid >= num_paths:
+            if path >= num_paths or i >= M:
                 return
 
-            for i in range(M):
-                value: Float32 = 0
-                for j in range(N):
-                    value += weight_tensor[i, j][0] * in_tensor[j, step, tid][0]
+            value: Float32 = 0
+            for j in range(N):
+                value += weight_tensor[i, j][0] * in_tensor[j, step, path][0]
 
-                value += bias_tensor[i][0]
-                value = activation.apply(value)
+            value += bias_tensor[i][0]
+            value = activation.apply(value)
 
-                out_tensor[i, step, tid] = value
+            out_tensor[i, step, path] = value
 
         self.ctx.enqueue_function_checked[apply_kernel, apply_kernel](
             self.weight_tensor,
@@ -166,7 +166,7 @@ struct DenseLayer[
             self.in_tensor,
             self.out_tensor,
             step,
-            grid_dim=(1),
+            grid_dim=(M),
             block_dim=(num_paths),
         )
         self.ctx.synchronize()
@@ -239,7 +239,7 @@ struct DenseLayer[
             cluster_arrive()
             cluster_wait()
 
-            decayed_learning_rate  = learning_rate * Float32(pow(0.99, counter / 10_000))
+            decayed_learning_rate  = learning_rate * Float32(pow(0.95, counter / 10_000))
 
             weight_m1_old = adams_weight_m1_tensor[i, j]
             weight_m2_old = adams_weight_m2_tensor[i, j]
