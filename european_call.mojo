@@ -274,6 +274,8 @@ fn main() raises:
     alias num_paths    = 1024
 
     learning_rate: Float32 = 1e-3
+    lrd_1:         Float32 = 0.95
+    lrd_2:         Float32 = 10_000
     beta1:         Float32 = 0.9
     beta2:         Float32 = 0.999
     eps:           Float32 = 10e-8
@@ -282,11 +284,11 @@ fn main() raises:
     drift:  Float32   = 0
     vol:    Float32   = 0.2
     strike: Float32   = 1.1
-    slippage: Float32 = 0.02
+    slippage: Float32 = 0.01
 
-    layer_1 = DenseLayer[network_size, inputs,       steps, num_paths, ReluActivation](ctx, 'layer 1', learning_rate, beta1, beta2, eps, weight_decay)
-    layer_2 = DenseLayer[network_size, network_size, steps, num_paths, ReluActivation](ctx, 'layer 2', learning_rate, beta1, beta2, eps, weight_decay)
-    layer_3 = DenseLayer[1,            network_size, steps, num_paths, TanhActivation](ctx, 'layer 3', learning_rate, beta1, beta2, eps, weight_decay)
+    layer_1 = DenseLayer[network_size, inputs,       steps, num_paths, ReluActivation](ctx, 'layer 1', learning_rate, lrd_1, lrd_2, beta1, beta2, eps, weight_decay)
+    layer_2 = DenseLayer[network_size, network_size, steps, num_paths, ReluActivation](ctx, 'layer 2', learning_rate, lrd_1, lrd_2, beta1, beta2, eps, weight_decay)
+    layer_3 = DenseLayer[1,            network_size, steps, num_paths, TanhActivation](ctx, 'layer 3', learning_rate, lrd_1, lrd_2, beta1, beta2, eps, weight_decay)
     loss    = EuropeanCallLoss[inputs, steps, num_paths](ctx, strike, slippage)
 
     pyray = Python.import_module('pyray')
@@ -325,7 +327,7 @@ fn main() raises:
 
 
         # Draw stuff
-        if batch % 50 == 0:
+        if batch % 100 == 0:
 
             margin = 10
 

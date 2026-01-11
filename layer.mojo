@@ -33,13 +33,15 @@ struct DenseLayer[
     alias random_size: Int = 4
     alias random_draws: Int = (N * M + Self.random_size - 1) // Self.random_size
 
-    var ctx:           DeviceContext
-    var layer_name:    String
-    var learning_rate: Float32
-    var beta1:         Float32
-    var beta2:         Float32
-    var eps:           Float32
-    var weight_decay:  Float32
+    var ctx:                   DeviceContext
+    var layer_name:            String
+    var learning_rate:         Float32
+    var learning_rate_decay_1: Float32
+    var learning_rate_decay_2: Float32
+    var beta1:                 Float32
+    var beta2:                 Float32
+    var eps:                   Float32
+    var weight_decay:          Float32
 
     var weight_buffer          : DeviceBuffer[DType.float32]
     var adams_weight_m1_buffer : DeviceBuffer[DType.float32]
@@ -65,17 +67,21 @@ struct DenseLayer[
 
     fn __init__(
             out self, 
-            ctx:           DeviceContext, 
-            layer_name:    String, 
-            learning_rate: Float32,
-            beta1:         Float32,
-            beta2:         Float32,
-            eps:           Float32,
-            weight_decay:  Float32,
+            ctx:                   DeviceContext, 
+            layer_name:            String, 
+            learning_rate:         Float32,
+            learning_rate_decay_1: Float32,
+            learning_rate_decay_2: Float32,
+            beta1:                 Float32,
+            beta2:                 Float32,
+            eps:                   Float32,
+            weight_decay:          Float32,
     ) raises:
         self.ctx = ctx
         self.layer_name = layer_name
         self.learning_rate = learning_rate
+        self.learning_rate_decay_1 = learning_rate_decay_1
+        self.learning_rate_decay_2 = learning_rate_decay_2
         self.beta1 = beta1
         self.beta2 = beta2
         self.eps = eps
@@ -221,6 +227,8 @@ struct DenseLayer[
             bias_temp_tensor:       LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutAnyOrigin],
             counter:                Int,
             learning_rate:          Float32,
+            learning_rate_decay_1:  Float32,
+            learning_rate_decay_2:  Float32,
             beta1:                  Float32,
             beta2:                  Float32,
             eps:                    Float32,
@@ -239,7 +247,7 @@ struct DenseLayer[
             cluster_arrive()
             cluster_wait()
 
-            decayed_learning_rate  = learning_rate * Float32(pow(0.95, counter / 10_000))
+            decayed_learning_rate  = learning_rate * Float32(pow(learning_rate_decay_1, counter / learning_rate_decay_2))
 
             weight_m1_old = adams_weight_m1_tensor[i, j]
             weight_m2_old = adams_weight_m2_tensor[i, j]
@@ -312,6 +320,8 @@ struct DenseLayer[
             bias_temp_tensor,
             self.counter,
             self.learning_rate,
+            self.learning_rate_decay_1,
+            self.learning_rate_decay_2,
             self.beta1,
             self.beta2,
             self.eps,
