@@ -2,7 +2,7 @@ based on:
 https://arxiv.org/abs/1802.03042
 
 - deep hedging implemented in mojo GPU kernels
-- recurrent, but didn't add transaction costs yet
+- recurrent
 - use python raylib to monitor training (pip install raylib)
 - the nn is completely independent of the model
     - can use any way to generate paths
