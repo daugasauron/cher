@@ -4,7 +4,7 @@ from random import NormalRandom
 from buffer import NDBuffer
 from activation import Activation
 from gpu.host import DeviceContext, DeviceBuffer, HostBuffer
-from gpu import block_idx, thread_idx, cluster_arrive, cluster_wait
+from gpu import block_idx, thread_idx, get_global_id, cluster_arrive, cluster_wait
 from gpu.primitives import block
 
 comptime TPB = 1024
@@ -17,16 +17,15 @@ fn he_init_kernel(
         seed:      UInt64,
         ptr:       UnsafePointer[Float32, MutAnyOrigin],
 ):
-    comptime rank = 2
+    buffer = NDBuffer[dtype, 2, MutAnyOrigin](ptr=ptr, dynamic_shape=IndexList[2](M, N))
 
-    buffer = NDBuffer[dtype, rank, MutAnyOrigin](ptr, IndexList[rank](M, N))
+    i    = Int(thread_idx.x)
+    j    = Int(thread_idx.y)
 
-    i    = Int(block_idx.x)
-    j    = Int(block_idx.y)
+    thread_seed = seed + UInt64(i * N + j)
+    random = NormalRandom(seed=thread_seed)
 
-    random = NormalRandom(seed=seed)
-
-    buffer[i, j] = (Float32(2 / UInt64(N)) ** 0.5) * random.step_normal()[0]
+    buffer[i, j] = ((2.0 / Float32(N)) ** 0.5) * random.step_normal()[0]
 
 
 struct DenseLayer[activation: Activation](Movable):
@@ -107,15 +106,15 @@ struct DenseLayer[activation: Activation](Movable):
         self.d_buffer              = ctx.enqueue_create_buffer[dtype](N * num_steps * num_paths)
         self.y_buffer              = ctx.enqueue_create_buffer[dtype](M * num_steps * num_paths)
 
-        self.ctx.enqueue_function_experimental[he_init_kernel](
+        self.ctx.enqueue_function[he_init_kernel, he_init_kernel](
                 self.M,
                 self.N,
                 self.seed,
                 self.weight_buffer,
-                grid_dim=(self.M, self.N),
-                block_dim=self.num_paths,
+                grid_dim=(1),
+                block_dim=(self.M, self.N),
         )
-
+        self.ctx.synchronize()
         self.counter = 1
 
     fn fwd(self, step: Int) raises:
@@ -162,8 +161,8 @@ struct DenseLayer[activation: Activation](Movable):
                 self.x_buffer,
                 self.y_buffer,
                 step,
-                grid_dim=self.M,
-                block_dim=num_paths,
+                grid_dim=(self.M),
+                block_dim=(num_paths),
         )
         self.ctx.synchronize()
 
@@ -185,7 +184,7 @@ struct DenseLayer[activation: Activation](Movable):
 
             w = NDBuffer[dtype, 2, MutAnyOrigin](ptr=w_ptr, dynamic_shape=IndexList[2](M, N))
             y = NDBuffer[dtype, 3, MutAnyOrigin](ptr=y_ptr, dynamic_shape=IndexList[3](M, num_steps, num_paths))
-            d = NDBuffer[dtype, 3, MutAnyOrigin](ptr=d_ptr, dynamic_shape=IndexList[3](M, num_steps, num_paths))
+            d = NDBuffer[dtype, 3, MutAnyOrigin](ptr=d_ptr, dynamic_shape=IndexList[3](N, num_steps, num_paths))
             u = NDBuffer[dtype, 3, MutAnyOrigin](ptr=u_ptr, dynamic_shape=IndexList[3](M, num_steps, num_paths))
 
             value: Float32 = 0
@@ -214,11 +213,11 @@ struct DenseLayer[activation: Activation](Movable):
             step = Int(block_idx.z + 1)
             path = Int(thread_idx.x)
 
-            w =     NDBuffer[dtype, 2, MutAnyOrigin](ptr=w_ptr, dynamic_shape=IndexList[2](M, N))
-            b =     NDBuffer[dtype, 1, MutAnyOrigin](ptr=b_ptr, dynamic_shape=IndexList[1](M))
-            x =     NDBuffer[dtype, 3, MutAnyOrigin](ptr=x_ptr, dynamic_shape=IndexList[3](N, num_steps, num_paths))
-            y =     NDBuffer[dtype, 3, MutAnyOrigin](ptr=y_ptr, dynamic_shape=IndexList[3](M, num_steps, num_paths))
-            u =     NDBuffer[dtype, 3, MutAnyOrigin](ptr=u_ptr, dynamic_shape=IndexList[3](M, num_steps, num_paths))
+            w =     NDBuffer[dtype, 2, MutAnyOrigin](ptr=w_ptr,     dynamic_shape=IndexList[2](M, N))
+            b =     NDBuffer[dtype, 1, MutAnyOrigin](ptr=b_ptr,     dynamic_shape=IndexList[1](M))
+            x =     NDBuffer[dtype, 3, MutAnyOrigin](ptr=x_ptr,     dynamic_shape=IndexList[3](N, num_steps, num_paths))
+            y =     NDBuffer[dtype, 3, MutAnyOrigin](ptr=y_ptr,     dynamic_shape=IndexList[3](M, num_steps, num_paths))
+            u =     NDBuffer[dtype, 3, MutAnyOrigin](ptr=u_ptr,     dynamic_shape=IndexList[3](M, num_steps, num_paths))
             w_tmp = NDBuffer[dtype, 3, MutAnyOrigin](ptr=w_tmp_ptr, dynamic_shape=IndexList[3](M, N, num_steps - 1))
             b_tmp = NDBuffer[dtype, 2, MutAnyOrigin](ptr=b_tmp_ptr, dynamic_shape=IndexList[2](M, num_steps - 1))
 
@@ -307,7 +306,7 @@ struct DenseLayer[activation: Activation](Movable):
                 b_m2[i] = m2_new
 
         w_tmp_buffer = self.ctx.enqueue_create_buffer[DType.float32](self.M * self.N * (self.num_steps - 1))
-        b_tmp_buffer = self.ctx.enqueue_create_buffer[DType.float32](self.M * (self.num_steps - 1))
+        b_tmp_buffer = self.ctx.enqueue_create_buffer[DType.float32](self.M          * (self.num_steps - 1))
 
         self.ctx.enqueue_function_experimental[downstream_kernel](
                 self.M,
@@ -319,7 +318,7 @@ struct DenseLayer[activation: Activation](Movable):
                 self.d_buffer,
                 upstream_buffer,
                 grid_dim=(self.N, self.num_steps - 1),
-                block_dim=self.num_paths,
+                block_dim=(self.num_paths),
         )
 
         self.ctx.enqueue_function_experimental[path_sum_kernel](

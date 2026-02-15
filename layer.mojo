@@ -1,13 +1,13 @@
 from layout.layout_tensor import Layout, LayoutTensor
 from gpu.host import DeviceContext, DeviceBuffer, DeviceAttribute, HostBuffer
-from gpu.cluster import cluster_arrive, cluster_wait
-from gpu import block_dim, block_idx, thread_idx, block
+from gpu.primitives import cluster_arrive, cluster_wait, block
+from gpu import block_dim, block_idx, thread_idx
 from math import sqrt
 from he_init import he_init
 from print_utils import print_matrix_2, print_matrix_3, print_matrix_special
 from activation import Activation, ReluActivation, TanhActivation
 
-alias TPB = 1024
+comptime TPB = 1024
 
 struct DenseLayer[
         M:          Int, 
@@ -17,21 +17,21 @@ struct DenseLayer[
         activation: Activation,
 ]:
 
-    alias weight_layout:  Layout = Layout.row_major(M, N)
-    alias bias_layout:    Layout = Layout.row_major(M)
-    alias in_layout:      Layout = Layout.row_major(N, steps, num_paths)
-    alias out_layout:     Layout = Layout.row_major(M, steps, num_paths)
-    alias in_vec_layout:  Layout = Layout.row_major(N, num_paths)
-    alias out_vec_layout: Layout = Layout.row_major(M, num_paths)
+    comptime weight_layout:  Layout = Layout.row_major(Self.M, Self.N)
+    comptime bias_layout:    Layout = Layout.row_major(Self.M)
+    comptime in_layout:      Layout = Layout.row_major(Self.N, Self.steps, Self.num_paths)
+    comptime out_layout:     Layout = Layout.row_major(Self.M, Self.steps, Self.num_paths)
+    comptime in_vec_layout:  Layout = Layout.row_major(Self.N, Self.num_paths)
+    comptime out_vec_layout: Layout = Layout.row_major(Self.M, Self.num_paths)
 
-    alias WeightTensorType = LayoutTensor[DType.float32, Self.weight_layout,  MutAnyOrigin]
-    alias BiasTensorType   = LayoutTensor[DType.float32, Self.bias_layout,    MutAnyOrigin]
-    alias InTensorType     = LayoutTensor[DType.float32, Self.in_layout,      MutAnyOrigin]
-    alias OutTensorType    = LayoutTensor[DType.float32, Self.out_layout,     MutAnyOrigin]
+    comptime WeightTensorType = LayoutTensor[DType.float32, Self.weight_layout,  MutAnyOrigin]
+    comptime BiasTensorType   = LayoutTensor[DType.float32, Self.bias_layout,    MutAnyOrigin]
+    comptime InTensorType     = LayoutTensor[DType.float32, Self.in_layout,      MutAnyOrigin]
+    comptime OutTensorType    = LayoutTensor[DType.float32, Self.out_layout,     MutAnyOrigin]
 
-    alias random_seed: Int = 42
-    alias random_size: Int = 4
-    alias random_draws: Int = (N * M + Self.random_size - 1) // Self.random_size
+    comptime random_seed: Int = 42
+    comptime random_size: Int = 4
+    comptime random_draws: Int = (Self.N * Self.M + Self.random_size - 1) // Self.random_size
 
     var ctx:                   DeviceContext
     var layer_name:            String
@@ -87,15 +87,15 @@ struct DenseLayer[
         self.eps = eps
         self.weight_decay = weight_decay
 
-        self.weight_buffer          = ctx.enqueue_create_buffer[DType.float32](M * N)
-        self.adams_weight_m1_buffer = ctx.enqueue_create_buffer[DType.float32](M * N)
-        self.adams_weight_m2_buffer = ctx.enqueue_create_buffer[DType.float32](M * N)
-        self.bias_buffer            = ctx.enqueue_create_buffer[DType.float32](M)
-        self.adams_bias_m1_buffer   = ctx.enqueue_create_buffer[DType.float32](M)
-        self.adams_bias_m2_buffer   = ctx.enqueue_create_buffer[DType.float32](M)
-        self.in_buffer              = ctx.enqueue_create_buffer[DType.float32](N * steps * num_paths)
-        self.out_buffer             = ctx.enqueue_create_buffer[DType.float32](M * steps * num_paths)
-        self.grad_buffer            = ctx.enqueue_create_buffer[DType.float32](N * steps * num_paths)
+        self.weight_buffer          = ctx.enqueue_create_buffer[DType.float32](Self.M * Self.N)
+        self.adams_weight_m1_buffer = ctx.enqueue_create_buffer[DType.float32](Self.M * Self.N)
+        self.adams_weight_m2_buffer = ctx.enqueue_create_buffer[DType.float32](Self.M * Self.N)
+        self.bias_buffer            = ctx.enqueue_create_buffer[DType.float32](Self.M)
+        self.adams_bias_m1_buffer   = ctx.enqueue_create_buffer[DType.float32](Self.M)
+        self.adams_bias_m2_buffer   = ctx.enqueue_create_buffer[DType.float32](Self.M)
+        self.in_buffer              = ctx.enqueue_create_buffer[DType.float32](Self.N * Self.steps * Self.num_paths)
+        self.out_buffer             = ctx.enqueue_create_buffer[DType.float32](Self.M * Self.steps * Self.num_paths)
+        self.grad_buffer            = ctx.enqueue_create_buffer[DType.float32](Self.N * Self.steps * Self.num_paths)
 
         self.weight_tensor          = Self.WeightTensorType(self.weight_buffer)
         self.adams_weight_m1_tensor = Self.WeightTensorType(self.adams_weight_m1_buffer)
@@ -109,7 +109,7 @@ struct DenseLayer[
 
         self.counter = 1
 
-        ctx.enqueue_function_checked[he_init[self.weight_layout], he_init[self.weight_layout]](
+        ctx.enqueue_function_experimental[he_init[self.weight_layout]](
             self.weight_tensor,
             self.random_seed,
             grid_dim=(1),
@@ -119,28 +119,28 @@ struct DenseLayer[
     fn print_weights(self) raises:
         print()
         print('====', self.layer_name, 'weights ====')
-        print_matrix_2[M, N](self.ctx, self.weight_buffer)
+        print_matrix_2[Self.M, Self.N](self.ctx, self.weight_buffer)
 
 
     fn print_input(self, path: Int) raises:
         print()
         print('====', self.layer_name, 'in, path:' , path, ' ====')
-        print_matrix_3[N, steps, num_paths](self.ctx, self.in_buffer, path)
+        print_matrix_3[Self.N, Self.steps, Self.num_paths](self.ctx, self.in_buffer, path)
 
     fn print_bias(self) raises:
         print()
         print('====', self.layer_name, 'bias ====')
-        print_matrix_2[M, 1](self.ctx, self.bias_buffer)
+        print_matrix_2[Self.M, 1](self.ctx, self.bias_buffer)
 
     fn print_output(self, path: Int) raises:
         print()
         print('====', self.layer_name, 'out, path:' , path, ' ====')
-        print_matrix_3[M, steps, num_paths](self.ctx, self.out_buffer, path)
+        print_matrix_3[Self.M, Self.steps, Self.num_paths](self.ctx, self.out_buffer, path)
 
     fn print_grad(self, path: Int) raises:
         print()
         print('====', self.layer_name, 'grad, path:', path, ' ====')
-        print_matrix_3[N, steps, num_paths](self.ctx, self.grad_buffer, path)
+        print_matrix_3[Self.N, Self.steps, Self.num_paths](self.ctx, self.grad_buffer, path)
 
     fn apply(self, step: Int) raises:
 
@@ -154,26 +154,26 @@ struct DenseLayer[
             i = Int(block_idx.x)
             path = Int(thread_idx.x)
 
-            if path >= num_paths or i >= M:
+            if path >= Self.num_paths or i >= Self.M:
                 return
 
             value: Float32 = 0
-            for j in range(N):
+            for j in range(Self.N):
                 value += weight_tensor[i, j][0] * in_tensor[j, step, path][0]
 
             value += bias_tensor[i][0]
-            value = activation.apply(value)
+            value = Self.activation.apply(value)
 
             out_tensor[i, step, path] = value
 
-        self.ctx.enqueue_function_checked[apply_kernel, apply_kernel](
+        self.ctx.enqueue_function_experimental[apply_kernel](
             self.weight_tensor,
             self.bias_tensor,
             self.in_tensor,
             self.out_tensor,
             step,
-            grid_dim=(M),
-            block_dim=(num_paths),
+            grid_dim=(Self.M),
+            block_dim=(Self.num_paths),
         )
         self.ctx.synchronize()
 
@@ -190,8 +190,8 @@ struct DenseLayer[
             path = thread_idx.x
 
             value: Float32 = 0
-            for i in range(M):
-                value += weight_tensor[i, j][0] * upstream_tensor[i, step, path][0] * activation.apply_grad(out_tensor[i, step, path][0])
+            for i in range(Self.M):
+                value += weight_tensor[i, j][0] * upstream_tensor[i, step, path][0] * Self.activation.apply_grad(out_tensor[i, step, path][0])
             downstream_tensor[j, step, path] = value
 
         fn path_sum_kernel(
@@ -200,15 +200,15 @@ struct DenseLayer[
             in_tensor:              Self.InTensorType,
             out_tensor:             Self.OutTensorType,
             upstream_tensor:        Self.OutTensorType,
-            weight_temp_tensor:     LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutAnyOrigin],
-            bias_temp_tensor:       LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutAnyOrigin],
+            weight_temp_tensor:     LayoutTensor[DType.float32, Layout.row_major(Self.M, Self.N, Self.steps - 1), MutAnyOrigin],
+            bias_temp_tensor:       LayoutTensor[DType.float32, Layout.row_major(Self.M,         Self.steps - 1), MutAnyOrigin],
         ):
             i    = block_idx.x
             j    = block_idx.y
             step = block_idx.z + 1
             path = thread_idx.x
 
-            bias_update:   Float32 = upstream_tensor[i, step, path][0] * activation.apply_grad(out_tensor[i, step, path][0])
+            bias_update:   Float32 = upstream_tensor[i, step, path][0] * Self.activation.apply_grad(out_tensor[i, step, path][0])
             weight_update: Float32 = in_tensor[j, step, path][0] * bias_update
 
             weight_temp_tensor[i, j, step - 1] = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](weight_update))
@@ -223,8 +223,8 @@ struct DenseLayer[
             bias_tensor:            Self.BiasTensorType,
             adams_bias_m1_tensor:   Self.BiasTensorType,
             adams_bias_m2_tensor:   Self.BiasTensorType,
-            weight_temp_tensor:     LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutAnyOrigin],
-            bias_temp_tensor:       LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutAnyOrigin],
+            weight_temp_tensor:     LayoutTensor[DType.float32, Layout.row_major(Self.M, Self. N, Self.steps - 1), MutAnyOrigin],
+            bias_temp_tensor:       LayoutTensor[DType.float32, Layout.row_major(Self.M,          Self.steps - 1), MutAnyOrigin],
             counter:                Int,
             learning_rate:          Float32,
             learning_rate_decay_1:  Float32,
@@ -280,22 +280,22 @@ struct DenseLayer[
                 adams_bias_m2_tensor[i] = m2_new
 
 
-        weight_temp_buffer = self.ctx.enqueue_create_buffer[DType.float32](M * N * (steps - 1))
-        bias_temp_buffer   = self.ctx.enqueue_create_buffer[DType.float32](M * (steps - 1))
+        weight_temp_buffer = self.ctx.enqueue_create_buffer[DType.float32](Self.M * Self.N * (Self.steps - 1))
+        bias_temp_buffer   = self.ctx.enqueue_create_buffer[DType.float32](Self.M * (Self.steps - 1))
 
-        weight_temp_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutAnyOrigin](weight_temp_buffer)
-        bias_temp_tensor   = LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutAnyOrigin](bias_temp_buffer)
+        weight_temp_tensor = LayoutTensor[DType.float32, Layout.row_major(Self.M, Self.N, Self.steps - 1), MutAnyOrigin](weight_temp_buffer)
+        bias_temp_tensor   = LayoutTensor[DType.float32, Layout.row_major(Self.M,         Self.steps - 1), MutAnyOrigin](bias_temp_buffer)
 
-        self.ctx.enqueue_function_checked[downstream_kernel, downstream_kernel](
+        self.ctx.enqueue_function_experimental[downstream_kernel](
             self.weight_tensor,
             self.out_tensor,
             upstream_tensor,
             self.grad_tensor,
-            grid_dim=(N, steps - 1),
-            block_dim=(num_paths),
+            grid_dim=(Self.N, Self.steps - 1),
+            block_dim=(Self.num_paths),
         )
 
-        self.ctx.enqueue_function_checked[path_sum_kernel, path_sum_kernel](
+        self.ctx.enqueue_function_experimental[path_sum_kernel](
             self.weight_tensor,
             self.bias_tensor,
             self.in_tensor,
@@ -303,13 +303,13 @@ struct DenseLayer[
             upstream_tensor,
             weight_temp_tensor,
             bias_temp_tensor,
-            grid_dim=(M, N, steps - 1),
-            block_dim=(num_paths),
+            grid_dim=(Self.M, Self.N, Self.steps - 1),
+            block_dim=(Self.num_paths),
         )
 
         self.ctx.synchronize()
 
-        self.ctx.enqueue_function_checked[update_kernel, update_kernel](
+        self.ctx.enqueue_function_experimental[update_kernel](
             self.weight_tensor,
             self.adams_weight_m1_tensor,
             self.adams_weight_m2_tensor,
@@ -326,8 +326,8 @@ struct DenseLayer[
             self.beta2,
             self.eps,
             self.weight_decay,
-            grid_dim=(M, N),
-            block_dim=(steps - 1),
+            grid_dim=(Self.M, Self.N),
+            block_dim=(Self.steps - 1),
         )
 
         self.ctx.synchronize()
@@ -347,17 +347,17 @@ struct DenseLayer[
             path = Int(thread_idx.x)
             i = Int(block_idx.x)
 
-            if path >= num_paths or i >= M:
+            if path >= Self.num_paths or i >= Self.M:
                 return
 
             input_tensor[i, step, path] = output_tensor[i, step, path]
 
-        self.ctx.enqueue_function_checked[feed_next_kernel, feed_next_kernel](
+        self.ctx.enqueue_function_experimental[feed_next_kernel](
                 self.out_tensor,
                 next_in_tensor,
                 step,
-                grid_dim=(M),
-                block_dim=(num_paths),
+                grid_dim=(Self.M),
+                block_dim=(Self.num_paths),
         )
         self.ctx.synchronize()
 

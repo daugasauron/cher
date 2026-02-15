@@ -16,9 +16,12 @@ from cher_mojo import Network
 STATIC_DIR_NAME = 'static'
 
 counter = count(0)
-connections: set[WebSocket] = set()
 
-async def worker_messaging(ws: WebSocket, message_queue: asyncio.Queue, socket_path: str):
+async def worker_messaging(
+        ws: WebSocket, 
+        message_queue: asyncio.Queue[str], 
+        socket_path: str
+):
     while True:
         try:
             reader, writer = await asyncio.open_unix_connection(socket_path)
@@ -78,7 +81,6 @@ def configure_ws(app: FastAPI):
     async def _(ws: WebSocket):
 
         await ws.accept()
-        connections.add(ws)
         message_queue = asyncio.Queue()
 
         socket_path = f'/tmp/worker-{next(counter)}.sock'
@@ -99,8 +101,6 @@ def configure_ws(app: FastAPI):
 
         except WebSocketDisconnect:
             print('disconnected')
-            connections.remove(ws)
-            message_queues.pop(ws, None)
             listener_task.cancel()
             worker_process.terminate()
 

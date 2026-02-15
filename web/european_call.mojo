@@ -87,7 +87,7 @@ struct EuropeanCallLoss(Movable):
     fn fwd(self, input_buffer: DeviceBuffer) raises:
 
         fn fwd_kernel(
-                inputs: Int,
+                inputs:     Int,
                 num_steps:  Int,
                 num_paths:  Int,
                 x_ptr:      UnsafePointer[Float32, MutAnyOrigin],
@@ -134,22 +134,22 @@ struct EuropeanCallLoss(Movable):
     fn bwd(self, input_buffer: DeviceBuffer) raises:
 
         fn bwd_kernel(
-                inputs: Int,
+                inputs:     Int,
                 num_steps:  Int,
                 num_paths:  Int,
-                x_ptr:  UnsafePointer[Float32, MutAnyOrigin],  
-                d_ptr:   UnsafePointer[Float32, MutAnyOrigin],  
+                x_ptr:      UnsafePointer[Float32, MutAnyOrigin],
+                d_ptr:      UnsafePointer[Float32, MutAnyOrigin],
                 strike:     Float32,
                 slippage:   Float32,
         ):
             path = Int(thread_idx.x)
 
             x = NDBuffer[dtype, 3, MutAnyOrigin](x_ptr, IndexList[3](inputs, num_steps, num_paths))
-            y = NDBuffer[dtype, 3, MutAnyOrigin](d_ptr, IndexList[3](inputs, num_steps, num_paths))
+            y = NDBuffer[dtype, 3, MutAnyOrigin](d_ptr, IndexList[3](1, num_steps, num_paths))
 
             value: Float32 = 0
 
-            for step in range(num_steps - 1):
+            for step in range(1, num_steps):
 
                 d   = x[2, step,     path]
                 s_c = x[1, step,     path]
@@ -161,13 +161,12 @@ struct EuropeanCallLoss(Movable):
 
             y[0, num_steps, path] = 0
 
-            for step in range(num_steps - 1):
+            for step in range(1, num_steps):
 
-                d   = x[2, step,     path]
-                s_c = x[1, step,     path]
-                s_n = x[1, step + 1, path]
+                s_c = x[1, step - 1, path]
+                s_n = x[1, step,     path]
 
-                y[0, step, path] = 2 * (value - payoff) * (s_n * (1 + slippage) - s_c * (1 - slippage))
+                y[0, step - 1, path] = 2 * (value - payoff) * (s_n * (1 + slippage) - s_c * (1 - slippage))
 
         self.ctx.enqueue_function_experimental[bwd_kernel](
                 self.inputs,
@@ -289,13 +288,11 @@ struct Network(Movable):
     fn generate_test_path(self) raises -> HostBuffer[dtype]:
 
         seed: UInt64 = UInt64(monotonic())
-
         comptime num_paths = 1
 
         buffer_size = self.params.inputs * self.params.num_steps
-
-        buffer = self.ctx.enqueue_create_buffer[dtype](buffer_size)
         host_buffer = self.ctx.enqueue_create_host_buffer[dtype](buffer_size)
+        buffer      = self.ctx.enqueue_create_buffer[dtype](buffer_size)
 
         self.ctx.enqueue_function_experimental[generate_paths_kernel](
                 self.params.inputs,
@@ -332,7 +329,7 @@ struct Network(Movable):
 
     fn copy_buffer(
             self,
-            m:           Int,
+            M:           Int,
             step:        Int,
             from_buffer: DeviceBuffer,
             to_buffer:   DeviceBuffer,
@@ -341,7 +338,7 @@ struct Network(Movable):
         fn feed_next_kernel(
                 num_steps: Int,
                 num_paths: Int,
-                m:         Int,
+                M:         Int,
                 step:      Int,
                 from_ptr:  UnsafePointer[Float32, MutAnyOrigin],
                 to_ptr:    UnsafePointer[Float32, MutAnyOrigin],
@@ -349,10 +346,10 @@ struct Network(Movable):
             path = Int(thread_idx.x)
             i = Int(block_idx.x)
 
-            from_buffer = NDBuffer[dtype, 3, MutAnyOrigin](from_ptr, IndexList[3](m, num_steps, num_paths))
-            to_buffer   = NDBuffer[dtype, 3, MutAnyOrigin](to_ptr,   IndexList[3](m, num_steps, num_paths))
+            from_buffer = NDBuffer[dtype, 3, MutAnyOrigin](from_ptr, IndexList[3](M, num_steps, num_paths))
+            to_buffer   = NDBuffer[dtype, 3, MutAnyOrigin](to_ptr,   IndexList[3](M, num_steps, num_paths))
 
-            if path >= num_paths or i >= m:
+            if path >= num_paths or i >= M:
                 return
 
             to_buffer[i, step, path] = from_buffer[i, step, path]
@@ -360,11 +357,11 @@ struct Network(Movable):
         self.ctx.enqueue_function_experimental[feed_next_kernel](
                 self.params.num_steps,
                 self.params.num_paths,
-                m,
+                M,
                 step,
                 from_buffer,
                 to_buffer,
-                grid_dim=(m),
+                grid_dim=(M),
                 block_dim=(self.params.num_paths),
         )
         self.ctx.synchronize()
@@ -425,7 +422,7 @@ struct Network(Movable):
                 self.params.num_paths,
                 step,
                 self.loss.grad_buffer,
-                self.layer_1.x_buffer,
+                self.layer_1.d_buffer,
                 grid_dim=(self.params.num_steps),
                 block_dim=(self.params.num_paths),
         )
@@ -448,7 +445,10 @@ struct Network(Movable):
             self.layer_3.fwd(step)
             self.next_step(step)
 
+            # abort()
+
         self.loss.fwd(self.layer_1.x_buffer)
+
 
     fn bwd(mut self) raises:
 
@@ -501,7 +501,7 @@ fn main() raises:
     params = Params(
             inputs       = 3,
             network_size = 16,
-            num_steps    = 30,
+            num_steps    = 20,
             num_paths    = 1024,
             lr           = 1e-3,
             lr_d1        = 0.95,

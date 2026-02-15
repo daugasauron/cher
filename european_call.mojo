@@ -2,8 +2,8 @@ from python import Python
 from layout.layout_tensor import Layout, LayoutTensor, IntTuple
 from gpu.host import DeviceContext, DeviceBuffer, DeviceAttribute, HostBuffer
 from gpu.memory import AddressSpace
-from gpu.cluster import cluster_arrive, cluster_wait
-from gpu import block_dim, block_idx, thread_idx, barrier, block
+from gpu.primitives import cluster_arrive, cluster_wait, block
+from gpu import block_dim, block_idx, thread_idx, barrier
 from math import sqrt, tanh, exp
 from random import NormalRandom
 from time import monotonic
@@ -17,9 +17,9 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
 
     var ctx: DeviceContext
 
-    alias ResultTensorType = LayoutTensor[DType.float32, Layout.row_major(1),                            MutAnyOrigin]
-    alias GradTensorType   = LayoutTensor[DType.float32, Layout.row_major(1, steps, num_paths),          MutAnyOrigin]
-    alias InputTensorType  = LayoutTensor[DType.float32, Layout.row_major(num_inputs, steps, num_paths), MutAnyOrigin] 
+    comptime ResultTensorType = LayoutTensor[DType.float32, Layout.row_major(1),                                           MutAnyOrigin]
+    comptime GradTensorType   = LayoutTensor[DType.float32, Layout.row_major(1, Self.steps, Self.num_paths),               MutAnyOrigin]
+    comptime InputTensorType  = LayoutTensor[DType.float32, Layout.row_major(Self.num_inputs, Self.steps, Self.num_paths), MutAnyOrigin] 
 
     var result_buffer: DeviceBuffer[DType.float32]
     var grad_buffer:   DeviceBuffer[DType.float32]
@@ -35,7 +35,7 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
         self.strike = strike
         self.slippage = slippage
         self.result_buffer = ctx.enqueue_create_buffer[DType.float32](1)
-        self.grad_buffer   = ctx.enqueue_create_buffer[DType.float32](1 * steps * num_paths)
+        self.grad_buffer   = ctx.enqueue_create_buffer[DType.float32](1 * Self.steps * Self.num_paths)
         self.result_tensor = Self.ResultTensorType(self.result_buffer)
         self.grad_tensor   = Self.GradTensorType(self.grad_buffer)
 
@@ -56,7 +56,7 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
     fn print_grad(self) raises:
         print()
         print('==== loss grad ====')
-        print_matrix_special[1, steps, num_paths](self.ctx, self.grad_buffer)
+        print_matrix_special[1, Self.steps, Self.num_paths](self.ctx, self.grad_buffer)
 
     fn apply[layout: Layout](
             self, 
@@ -71,13 +71,13 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
         ):
             path = Int(thread_idx.x)
             value: Float32 = 0
-            for step in range(1, steps):
+            for step in range(1, Self.steps):
                 value += input_tensor[2, step, path][0] * (
                             input_tensor[1,     step, path][0] * (1 + slippage) - 
                             input_tensor[1, step - 1, path][0] * (1 - slippage)
                         )
 
-            payoff: Float32 = max(input_tensor[1, steps - 1, path][0] - strike, 0)
+            payoff: Float32 = max(input_tensor[1, Self.steps - 1, path][0] - strike, 0)
             error:  Float32 = (value - payoff) ** 2
 
             total_error = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](error))
@@ -88,13 +88,13 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
             if thread_idx.x == 0:
                 result_tensor[0] = total_error
 
-        self.ctx.enqueue_function_checked[european_call_loss_kernel, european_call_loss_kernel](
+        self.ctx.enqueue_function_experimental[european_call_loss_kernel](
                 input_tensor,
                 self.result_tensor,
                 self.strike,
                 self.slippage,
                 grid_dim=(1),
-                block_dim=(num_paths),
+                block_dim=(Self.num_paths),
         )
         self.ctx.synchronize()
 
@@ -111,33 +111,33 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
         ):
             path = Int(thread_idx.x)
 
-            if path >= num_paths:
+            if path >= Self.num_paths:
                 return
 
             value: Float32 = 0
 
-            for step in range(steps - 1):
+            for step in range(Self.steps - 1):
                 value += input_tensor[2, step + 1, path] [0] * (
                         input_tensor[1, step + 1, path][0] * (1 + slippage) -
                         input_tensor[1, step    , path][0] * (1 - slippage)
                     )
 
-            payoff = max(input_tensor[1, steps - 1, path] - strike, 0)
-            grad_tensor[0, steps, path] = 0
+            payoff = max(input_tensor[1, Self.steps - 1, path] - strike, 0)
+            grad_tensor[0, Self.steps, path] = 0
 
-            for step in range(steps - 1):
+            for step in range(Self.steps - 1):
                 grad_tensor[0, step, path] = 2 * (value - payoff) * (
                         input_tensor[1, step + 1, path] * (1 + slippage) -
                         input_tensor[1, step,     path] * (1 - slippage)
                     )
 
-        self.ctx.enqueue_function_checked[european_call_grad_kernel, european_call_grad_kernel](
+        self.ctx.enqueue_function_experimental[european_call_grad_kernel](
                 input_tensor,
                 self.grad_tensor,
                 self.strike,
                 self.slippage,
                 grid_dim=(1),
-                block_dim=(num_paths),
+                block_dim=(Self.num_paths),
         )
         self.ctx.synchronize()
 
@@ -180,7 +180,7 @@ fn generate_paths[num_inputs: Int, steps: Int, num_paths: Int](
             input_tensor[1, step, path] = input_tensor[1, step - 1, path] * exp((drift - 0.5 * vol ** 2)*dt + vol * sqrt(dt) * z)
             input_tensor[2, step, path] = 0
 
-    ctx.enqueue_function_checked[generate_paths_kernel, generate_paths_kernel](
+    ctx.enqueue_function_experimental[generate_paths_kernel](
             input_tensor,
             drift,
             vol,
@@ -210,7 +210,7 @@ fn next_step[input_size: Int, steps: Int, num_paths: Int](
 
         input_tensor[2, step + 1, path] = output_tensor[0, step, path]
 
-    ctx.enqueue_function_checked[next_step_kernel, next_step_kernel](
+    ctx.enqueue_function_experimental[next_step_kernel](
             output_tensor,
             input_tensor,
             step,
@@ -243,7 +243,7 @@ fn update_loss_grad[num_inputs: Int, steps: Int, num_paths: Int](
         else:
             grad_tensor[0, step_idx, path] = 0.0
 
-    ctx.enqueue_function_checked[update_loss_grad_kernel, update_loss_grad_kernel](
+    ctx.enqueue_function_experimental[update_loss_grad_kernel](
             grad_tensor,
             input_tensor,
             step,
@@ -264,10 +264,10 @@ fn main() raises:
     print('MAX_SHARED_MEMORY_PER_MULTIPROCESSOR', ctx.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_MULTIPROCESSOR))
     print()
 
-    alias inputs       = 3
-    alias steps        = 20
-    alias network_size = 16
-    alias num_paths    = 1024
+    comptime inputs       = 3
+    comptime steps        = 20
+    comptime network_size = 16
+    comptime num_paths    = 1024
 
     learning_rate: Float32 = 1e-3
     lrd_1:         Float32 = 0.95

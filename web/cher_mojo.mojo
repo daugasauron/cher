@@ -141,7 +141,7 @@ struct PythonNetwork(
                 network_size = 16,
                 num_steps    = 30,
                 num_paths    = 1024,
-                lr           = 1e-3,
+                lr           = 1e-2,
                 lr_d1        = 0.95,
                 lr_d2        = 10_000,
                 beta1        = 0.9,
