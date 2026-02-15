@@ -10,7 +10,7 @@ from math import exp, sqrt
 from dense_layer import DenseLayer, TPB
 from activation import ReluActivation, TanhActivation
 
-comptime dtype = DType.float32
+comptime dtype: DType = DType.float32
 
 fn generate_paths_kernel(
         inputs:    Int,
@@ -47,34 +47,24 @@ fn generate_paths_kernel(
 struct EuropeanCallLoss(Movable):
 
     var ctx: DeviceContext
-
-    var inputs: Int
-    var num_steps:  Int
-    var num_paths:  Int
+    var params_ptr: UnsafePointer[Params, MutAnyOrigin]
 
     var result_buffer: DeviceBuffer[dtype]
     var grad_buffer:   DeviceBuffer[dtype]
 
-    var strike:   Float32
-    var slippage: Float32
-
     fn __init__(
-            out self, 
-            ctx:        DeviceContext,
-            inputs:     Int,
-            num_steps:  Int,
-            num_paths:  Int,
-            strike:     Float32,
-            slippage:   Float32,
+            out self,
+            ctx:      DeviceContext,
+            params:   UnsafePointer[Params, MutAnyOrigin],
     ) raises:
         self.ctx           = ctx
-        self.inputs        = inputs
-        self.num_steps     = num_steps
-        self.num_paths     = num_paths
-        self.strike        = strike
-        self.slippage      = slippage
+        self.params_ptr    = params
         self.result_buffer = ctx.enqueue_create_buffer[dtype](1)
-        self.grad_buffer   = ctx.enqueue_create_buffer[dtype](1 * num_steps * num_paths)
+        self.grad_buffer   = ctx.enqueue_create_buffer[dtype](1 * params[].num_steps * params[].num_paths)
+
+        print('inputs', params[].inputs)
+        print('num_steps', params[].num_steps)
+        print('num_paths', params[].num_paths)
 
 
     fn value(self) raises -> Float32:
@@ -119,15 +109,15 @@ struct EuropeanCallLoss(Movable):
                 y_ptr[0] = total_error
 
         self.ctx.enqueue_function_experimental[fwd_kernel](
-                self.inputs,
-                self.num_steps,
-                self.num_paths,
+                self.params_ptr[].inputs,
+                self.params_ptr[].num_steps,
+                self.params_ptr[].num_paths,
                 input_buffer,
                 self.result_buffer,
-                self.strike,
-                self.slippage,
+                self.params_ptr[].strike,
+                self.params_ptr[].slippage,
                 grid_dim=(1),
-                block_dim=self.num_paths,
+                block_dim=self.params_ptr[].num_paths,
         )
         self.ctx.synchronize()
 
@@ -169,15 +159,15 @@ struct EuropeanCallLoss(Movable):
                 y[0, step - 1, path] = 2 * (value - payoff) * (s_n * (1 + slippage) - s_c * (1 - slippage))
 
         self.ctx.enqueue_function_experimental[bwd_kernel](
-                self.inputs,
-                self.num_steps,
-                self.num_paths,
+                self.params_ptr[].inputs,
+                self.params_ptr[].num_steps,
+                self.params_ptr[].num_paths,
                 input_buffer,
                 self.grad_buffer,
-                self.strike,
-                self.slippage,
+                self.params_ptr[].strike,
+                self.params_ptr[].slippage,
                 grid_dim=(1),
-                block_dim=(self.num_paths),
+                block_dim=(self.params_ptr[].num_paths),
         )
         self.ctx.synchronize()
 
@@ -270,11 +260,7 @@ struct Network(Movable):
 
         self.loss = EuropeanCallLoss(
                 self.ctx,
-                params.inputs,
-                params.num_steps,
-                params.num_paths,
-                params.strike,
-                params.slippage,
+                UnsafePointer(to=self.params),
         )
 
     fn __moveinit__(out self, deinit existing: Self):
@@ -284,6 +270,8 @@ struct Network(Movable):
         self.layer_2 = existing.layer_2^
         self.layer_3 = existing.layer_3^
         self.loss = existing.loss^
+        # Update the params pointer to point to the new location
+        self.loss.params_ptr = UnsafePointer(to=self.params)
 
     fn generate_test_path(self) raises -> HostBuffer[dtype]:
 
@@ -484,6 +472,11 @@ struct Network(Movable):
         self.ctx.synchronize()
 
         return host_buffer[0]
+
+    fn reset_counters(mut self):
+        self.layer_1.reset_counter()
+        self.layer_2.reset_counter()
+        self.layer_3.reset_counter()
 
 
 fn main() raises:

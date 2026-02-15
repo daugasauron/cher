@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import socket
 import struct
 import itertools
@@ -10,10 +11,12 @@ BATCH_UPDATE_SIZE = 10
 
 class MessageReceive:
     GENERATE_TEST_PATH: int = 1
+    SET_SLIPPAGE: int       = 2
 
 class MessageSend:
     LOSS: int      = 1
     TEST_PATH: int = 2
+    PARAMS: int    = 3
 
 
 def main():
@@ -38,6 +41,16 @@ def main():
 
         print('Client connected')
 
+        # Send initial params to client
+        params = network.get_params()
+        # Clean up float precision issues using significant figures
+        for key, value in params.items():
+            if isinstance(value, float):
+                params[key] = float(f'{value:.6g}')
+        params_json = json.dumps(params).encode('utf-8')
+        msg = struct.pack('!hI', MessageSend.PARAMS, len(params_json)) + params_json
+        conn.sendall(msg)
+
         while True:
 
             try:
@@ -49,6 +62,13 @@ def main():
                     case MessageReceive.GENERATE_TEST_PATH:
                         print('Generate test path')
                         test_path = network.test_path()
+
+                    case MessageReceive.SET_SLIPPAGE:
+                        data = conn.recv(4)
+                        slippage, = struct.unpack('!f', data)
+                        print(f'Set slippage: {slippage}')
+                        network.set_slippage(slippage)
+                        network.reset_counters()
 
 
             except BlockingIOError as e:

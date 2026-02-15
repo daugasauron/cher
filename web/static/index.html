@@ -51,7 +51,7 @@
                 var strikeTrace = {
                     name: 'strike',
                     x: [1, 0],
-                    y: [strikeInputElement.value, strikeInputElement.value],
+                    y: [0, 0],
                     mode: 'lines',
                     line: { color: '#f38ba8' },
                 };
@@ -71,6 +71,18 @@
                 ws.onclose = () => console.log('websocket closed');
                 ws.onmessage = (event) => {
                     data = JSON.parse(event.data)
+                    if ('params' in data) {
+                        const params = data.params;
+                        for (const [key, value] of Object.entries(params)) {
+                            const element = document.getElementById(key);
+                            if (element) {
+                                element.value = value;
+                            }
+                        }
+                        // Update strike trace with new value
+                        strikeTrace.y = [params.strike, params.strike];
+                        Plotly.react(testPathPlotElement, [strikeTrace], plotlyLayout);
+                    }
                     if ('loss' in data) {
                         lossElement.textContent = data.loss;
                     }
@@ -151,176 +163,160 @@
                         inputs:
                     </label>
                     <input type="number"
-                           id="inputs" 
+                           id="inputs"
                            name="inputs"
                            step="1"
                            data-type="int"
-                           value="3"
                     />
 
                     <label for="network_size">
                         network size:
                     </label>
                     <input type="number"
-                           id="network_size" 
+                           id="network_size"
                            name="network_size"
                            step="1"
                            data-type="int"
-                           value="16"
                     />
 
                     <label for="steps">
-                        steps 
+                        steps
                     </label>
                     <input type="number"
-                           id="steps" 
+                           id="steps"
                            name="steps"
                            step="1"
                            data-type="int"
-                           value="20"
                     />
 
                     <label for="paths">
-                        paths 
+                        paths
                     </label>
                     <input type="number"
-                           id="paths" 
+                           id="paths"
                            name="paths"
                            step="1"
                            data-type="int"
-                           value="1024"
                     />
 
                     <label for="lr">
-                        learning rate 
+                        learning rate
                     </label>
                     <input type="number"
-                           id="lr" 
+                           id="lr"
                            name="lr"
                            step="1e-6"
                            data-type="float"
-                           value="0.001"
                     />
 
                     <label for="lr_d1">
                         learning rate decay 1
                     </label>
                     <input type="number"
-                           id="lr_d1" 
+                           id="lr_d1"
                            name="lr_d1"
                            step="0.01"
                            data-type="float"
-                           value="0.95"
                     />
 
                     <label for="lr_d2">
                         learning rate decay 2
                     </label>
                     <input type="number"
-                           id="lr_d2" 
+                           id="lr_d2"
                            name="lr_d2"
                            step="1"
                            data-type="float"
-                           value="10000"
                     />
 
                     <label for="beta1">
                         beta 1
                     </label>
                     <input type="number"
-                           id="beta1" 
+                           id="beta1"
                            name="beta1"
                            step="1e-4"
                            data-type="float"
-                           value="0.9"
                     />
 
                     <label for="beta2">
                         beta 2
                     </label>
                     <input type="number"
-                           id="beta2" 
+                           id="beta2"
                            name="beta2"
                            step="1e-4"
                            data-type="float"
-                           value="0.999"
                     />
 
                     <label for="eps">
                         eps
                     </label>
                     <input type="number"
-                           id="eps" 
+                           id="eps"
                            name="eps"
                            step="1e-12"
                            data-type="float"
-                           value="1e-10"
                     />
 
                     <label for="weight_decay">
                         weight decay
                     </label>
                     <input type="number"
-                           id="weight_decay" 
+                           id="weight_decay"
                            name="weight_decay"
                            step="1e-4"
                            data-type="float"
-                           value="1e-2"
                     />
 
                     <label for="drift">
                         drift
                     </label>
                     <input type="number"
-                           id="drift" 
+                           id="drift"
                            name="drift"
                            step="1e-4"
                            data-type="float"
-                           value="0"
                     />
 
                     <label for="vol">
                         vol
                     </label>
                     <input type="number"
-                           id="vol" 
+                           id="vol"
                            name="vol"
                            step="0.01"
                            data-type="float"
-                           value="0.2"
                     />
 
                     <label for="strike">
                         strike
                     </label>
                     <input type="number"
-                           id="strike" 
+                           id="strike"
                            name="strike"
                            step="0.01"
                            data-type="float"
-                           value="1.1"
                     />
 
                     <label for="slippage">
                         slippage
                     </label>
                     <input type="number"
-                           id="slippage" 
+                           id="slippage"
                            name="slippage"
                            step="1e-4"
                            data-type="float"
-                           value="0.01"
                     />
 
                     <label for="seed">
                         seed
                     </label>
                     <input type="number"
-                           id="seed" 
+                           id="seed"
                            name="seed"
                            step="1"
                            data-type="int"
-                           value="42"
                     />
 
                     <input type="button" 
@@ -337,7 +333,7 @@
                     <input type="button" 
                            id="generate_path_button" 
                            name="generate_path_button" 
-                           value="generate path"
+                           value="regenerate path"
                            onClick="generatePath()"
                     />
                 </div>
@@ -346,8 +342,20 @@
         </div>
         <script>
             document.getElementById("parameters_form").addEventListener("input", function(event) {
-                const jsonData = formDataAsJson();
                 if (ws.readyState == ws.OPEN) {
+                    const element = event.target;
+                    const name = element.name;
+                    const dataType = element.getAttribute('data-type');
+                    let value = element.value;
+
+                    if (dataType == 'int') {
+                        value = parseInt(value, 10);
+                    } else if (dataType == 'float') {
+                        value = parseFloat(value);
+                    }
+
+                    const jsonData = {};
+                    jsonData[name] = value;
                     ws.send(JSON.stringify(jsonData));
                 }
             });

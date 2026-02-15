@@ -4,7 +4,7 @@ from random import NormalRandom
 from buffer import NDBuffer
 from activation import Activation
 from gpu.host import DeviceContext, DeviceBuffer, HostBuffer
-from gpu import block_idx, thread_idx, get_global_id, cluster_arrive, cluster_wait
+from gpu import block_idx, thread_idx, cluster_arrive, cluster_wait
 from gpu.primitives import block
 
 comptime TPB = 1024
@@ -367,6 +367,9 @@ struct DenseLayer[activation: Activation](Movable):
         self.ctx.synchronize()
 
         self.counter += 1
+
+    fn reset_counter(mut self):
+        self.counter = 1
 
     fn put_test_path(self, test_path_buffer: DeviceBuffer) raises:
 

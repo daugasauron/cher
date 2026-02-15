@@ -25,6 +25,9 @@ fn PyInit_cher_mojo() -> PythonObject:
                 .def_method[PythonNetwork.loss]('loss')
                 .def_method[PythonNetwork.test_path]('test_path')
                 .def_method[PythonNetwork.update_lr]('update_lr')
+                .def_method[PythonNetwork.get_params]('get_params')
+                .def_method[PythonNetwork.set_slippage]('set_slippage')
+                .def_method[PythonNetwork.reset_counters]('reset_counters')
 
         return m.finalize()
 
@@ -206,4 +209,41 @@ struct PythonNetwork(
     fn update_lr(py_self: PythonObject, lr: PythonObject) raises:
         self_ptr = py_self.downcast_value_ptr[Self]()
         self_ptr[].network.params.lr = Float32(py=lr)
+
+    @staticmethod
+    fn set_slippage(py_self: PythonObject, slippage: PythonObject) raises:
+        self_ptr = py_self.downcast_value_ptr[Self]()
+        self_ptr[].network.params.slippage = Float32(py=slippage)
+
+    @staticmethod
+    fn reset_counters(py_self: PythonObject) raises:
+        self_ptr = py_self.downcast_value_ptr[Self]()
+        self_ptr[].network.reset_counters()
+
+    @staticmethod
+    fn get_params(py_self: PythonObject) raises -> PythonObject:
+        self_ptr = py_self.downcast_value_ptr[Self]()
+        ref params = self_ptr[].network.params
+
+        builtins = Python.import_module('builtins')
+        result = builtins.dict()
+
+        result['inputs']       = params.inputs
+        result['network_size'] = params.network_size
+        result['steps']        = params.num_steps
+        result['paths']        = params.num_paths
+        result['lr']           = params.lr
+        result['lr_d1']        = params.lr_d1
+        result['lr_d2']        = params.lr_d2
+        result['beta1']        = params.beta1
+        result['beta2']        = params.beta2
+        result['eps']          = params.eps
+        result['weight_decay'] = params.weight_decay
+        result['drift']        = params.drift
+        result['vol']          = params.vol
+        result['strike']       = params.strike
+        result['slippage']     = params.slippage
+        result['seed']         = Int(params.seed)
+
+        return result
 

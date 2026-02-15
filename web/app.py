@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import worker as w
 import struct
@@ -29,10 +30,15 @@ async def worker_messaging(
 
             while True:
                 try:
-                    msg = message_queue.get_nowait()
-                    print(f'event: {msg}')
-                    if msg == 'generate_path':
+                    msg_type, msg_value = message_queue.get_nowait()
+                    print(f'{msg_type}: {msg_value}')
+
+                    if msg_type == 'event' and msg_value == 'generate_path':
                         msg = struct.pack('!h', w.MessageReceive.GENERATE_TEST_PATH)
+                        writer.write(msg)
+
+                    elif msg_type == 'slippage':
+                        msg = struct.pack('!hf', w.MessageReceive.SET_SLIPPAGE, msg_value)
                         writer.write(msg)
 
                 except asyncio.QueueEmpty:
@@ -42,6 +48,13 @@ async def worker_messaging(
                 msg_type, = struct.unpack('!h', msg_type_data)
 
                 match msg_type:
+
+                    case w.MessageSend.PARAMS:
+                        length_data = await reader.readexactly(4)
+                        length, = struct.unpack('!I', length_data)
+                        params_data = await reader.readexactly(length)
+                        params = json.loads(params_data.decode('utf-8'))
+                        await ws.send_json({'params': params})
 
                     case w.MessageSend.LOSS:
                         data = await reader.readexactly(4)
@@ -97,7 +110,10 @@ def configure_ws(app: FastAPI):
                 print(f'received JSON: {parameters}')
 
                 if 'event' in parameters:
-                    message_queue.put_nowait(parameters['event'])
+                    message_queue.put_nowait(('event', parameters['event']))
+
+                if 'slippage' in parameters:
+                    message_queue.put_nowait(('slippage', parameters['slippage']))
 
         except WebSocketDisconnect:
             print('disconnected')
