@@ -4,19 +4,20 @@ from random import NormalRandom
 from buffer import NDBuffer
 from activation import Activation
 from gpu.host import DeviceContext, DeviceBuffer, HostBuffer
-from gpu import block_idx, thread_idx, block, barrier
+from gpu import block_idx, thread_idx, cluster_arrive, cluster_wait
+from gpu.primitives import block
 
-alias TPB = 1024
-alias dtype: DType = DType.float32
+comptime TPB = 1024
+comptime dtype: DType = DType.float32
 
 
 fn he_init_kernel(
         M:         Int,
         N:         Int,
-        seed:      Int,
+        seed:      UInt64,
         ptr:       UnsafePointer[Float32, MutAnyOrigin],
 ):
-    alias rank = 2
+    comptime rank = 2
 
     buffer = NDBuffer[dtype, rank, MutAnyOrigin](ptr, IndexList[rank](M, N))
 
@@ -25,10 +26,10 @@ fn he_init_kernel(
 
     random = NormalRandom(seed=seed)
 
-    buffer[i, j] = (Float32(2.0 / N) ** 0.5) * random.step_normal()[0]
+    buffer[i, j] = (Float32(2 / UInt64(N)) ** 0.5) * random.step_normal()[0]
 
 
-struct DenseLayer[activation: Activation]:
+struct DenseLayer[activation: Activation](Movable):
 
     var ctx: DeviceContext
 
@@ -45,7 +46,7 @@ struct DenseLayer[activation: Activation]:
     var eps:          Float32
     var weight_decay: Float32
 
-    var seed: Int
+    var seed: UInt64
 
     var weight_buffer:         DeviceBuffer[dtype]
     var weight_adam_m1_buffer: DeviceBuffer[dtype]
@@ -75,7 +76,7 @@ struct DenseLayer[activation: Activation]:
             beta2:        Float32,
             eps:          Float32,
             weight_decay: Float32,
-            seed:         Int,
+            seed:         UInt64,
     ):
         self.ctx = ctx
 
@@ -118,6 +119,9 @@ struct DenseLayer[activation: Activation]:
         self.counter = 1
 
     fn fwd(self, step: Int) raises:
+        self.fwd(step, self.num_paths)
+
+    fn fwd(self, step: Int, num_paths: Int) raises:
 
         fn fwd_kernel(
                 M:         Int,
@@ -144,7 +148,7 @@ struct DenseLayer[activation: Activation]:
                 value += w[i, j] * x[j, step, path]
 
             value += b[i]
-            value = activation.apply(value)
+            value = Self.activation.apply(value)
 
             y[i, step, path] = value
 
@@ -152,14 +156,14 @@ struct DenseLayer[activation: Activation]:
                 self.M,
                 self.N,
                 self.num_steps,
-                self.num_paths,
+                num_paths,
                 self.weight_buffer,
                 self.bias_buffer,
                 self.x_buffer,
                 self.y_buffer,
                 step,
                 grid_dim=self.M,
-                block_dim=self.num_paths,
+                block_dim=num_paths,
         )
         self.ctx.synchronize()
 
@@ -187,7 +191,7 @@ struct DenseLayer[activation: Activation]:
             value: Float32 = 0
 
             for i in range(M):
-                value += w[i, j] * u[i, step, path] * activation.apply_grad(y[i, step, path])
+                value += w[i, j] * u[i, step, path] * Self.activation.apply_grad(y[i, step, path])
 
             d[j, step, path] = value
 
@@ -218,8 +222,8 @@ struct DenseLayer[activation: Activation]:
             w_tmp = NDBuffer[dtype, 3, MutAnyOrigin](ptr=w_tmp_ptr, dynamic_shape=IndexList[3](M, N, num_steps - 1))
             b_tmp = NDBuffer[dtype, 2, MutAnyOrigin](ptr=b_tmp_ptr, dynamic_shape=IndexList[2](M, num_steps - 1))
 
-            b_update = u[i, step, path] * activation.apply_grad(y[i, step, path])
-            w_update = x[j, step, path] + b_update
+            b_update = u[i, step, path] * Self.activation.apply_grad(y[i, step, path])
+            w_update = x[j, step, path] * b_update
 
             w_tmp[i, j, step - 1] = block.sum[block_size=TPB, broadcast=False](val=SIMD[dtype, 1](w_update))
 
@@ -261,12 +265,16 @@ struct DenseLayer[activation: Activation]:
             w_tmp = NDBuffer[dtype, 3, MutAnyOrigin](ptr=w_tmp_ptr, dynamic_shape=IndexList[3](M, N, num_steps - 1))
             b_tmp = NDBuffer[dtype, 2, MutAnyOrigin](ptr=b_tmp_ptr, dynamic_shape=IndexList[2](M, num_steps - 1))
 
-            w_update = block.sum[block_size=TPB, broadcast=False](val=SIMD[dtype, 1](w_tmp[i, j, step]))
-            b_update = block.sum[block_size=TPB, broadcast=False](val=SIMD[dtype, 1](b_tmp[i, step]))
+            w_update_t = w_tmp[i, j, step]
+            b_update_t = b_tmp[i, step]
 
-            barrier()
+            w_update = block.sum[block_size=TPB, broadcast=False](val=SIMD[dtype, 1](w_update_t))
+            b_update = block.sum[block_size=TPB, broadcast=False](val=SIMD[dtype, 1](b_update_t))
 
-            decayed_lr  = lr * Float32(pow(lr_d1, counter / lr_d2))
+            cluster_arrive()
+            cluster_wait()
+
+            decayed_lr  = lr * Float32(pow(lr_d1, Float32(counter) / lr_d2))
 
             w_m1_old = w_m1[i, j]
             w_m2_old = w_m2[i, j]
@@ -298,8 +306,8 @@ struct DenseLayer[activation: Activation]:
                 b_m1[i] = m1_new
                 b_m2[i] = m2_new
 
-        w_tmp_buffer = self.ctx.enqueue_create_buffer[DType.float32](self.M * self.N * self.num_steps - 1)
-        b_tmp_buffer = self.ctx.enqueue_create_buffer[DType.float32](self.M * self.num_steps - 1)
+        w_tmp_buffer = self.ctx.enqueue_create_buffer[DType.float32](self.M * self.N * (self.num_steps - 1))
+        b_tmp_buffer = self.ctx.enqueue_create_buffer[DType.float32](self.M * (self.num_steps - 1))
 
         self.ctx.enqueue_function_experimental[downstream_kernel](
                 self.M,
@@ -361,12 +369,82 @@ struct DenseLayer[activation: Activation]:
 
         self.counter += 1
 
+    fn put_test_path(self, test_path_buffer: DeviceBuffer) raises:
+
+        fn put_test_path_kernel(
+                N:             Int,
+                num_steps:     Int,
+                num_paths:     Int,
+                test_path_ptr: UnsafePointer[Float32, MutAnyOrigin],
+                x_ptr:         UnsafePointer[Float32, MutAnyOrigin],
+        ):
+            i    = Int(block_idx.x)
+            step = Int(block_idx.y)
+
+            x = NDBuffer[dtype, 3, MutAnyOrigin](
+                    ptr=x_ptr, 
+                    dynamic_shape=IndexList[3](N, num_steps, num_paths)
+            )
+
+            t = NDBuffer[dtype, 2, MutAnyOrigin](
+                    ptr=test_path_ptr, 
+                    dynamic_shape=IndexList[2](N, num_steps)
+            )
+
+            x[i, step, 0] = t[i, step]
+
+        self.ctx.enqueue_function_experimental[put_test_path_kernel](
+                self.N,
+                self.num_steps,
+                self.num_paths,
+                test_path_buffer,
+                self.x_buffer,
+                grid_dim=(self.N, self.num_steps),
+                block_dim=(1),
+        )
+        self.ctx.synchronize()
+
+    fn get_test_path(self, test_path_buffer: DeviceBuffer) raises:
+
+        fn get_test_path_kernel(
+                N:             Int,
+                num_steps:     Int,
+                num_paths:     Int,
+                test_path_ptr: UnsafePointer[Float32, MutAnyOrigin],
+                x_ptr:         UnsafePointer[Float32, MutAnyOrigin],
+        ):
+            i    = Int(block_idx.x)
+            step = Int(block_idx.y)
+
+            x = NDBuffer[dtype, 3, MutAnyOrigin](
+                    ptr=x_ptr, 
+                    dynamic_shape=IndexList[3](N, num_steps, num_paths)
+            )
+
+            t = NDBuffer[dtype, 2, MutAnyOrigin](
+                    ptr=test_path_ptr, 
+                    dynamic_shape=IndexList[2](N, num_steps)
+            )
+            t[i, step] = x[i, step, 0]
+
+        self.ctx.enqueue_function_experimental[get_test_path_kernel](
+                self.N,
+                self.num_steps,
+                self.num_paths,
+                test_path_buffer,
+                self.x_buffer,
+                grid_dim=(self.N, self.num_steps),
+                block_dim=(1),
+        )
+        self.ctx.synchronize()
+
+
 fn main() raises:
     from activation import ReluActivation
 
     ctx = DeviceContext()
 
-    _ = DenseLayer[ReluActivation](
+    layer = DenseLayer[ReluActivation](
             ctx,
             16,
             3,
@@ -381,3 +459,4 @@ fn main() raises:
             0.01,
             42,
     )
+

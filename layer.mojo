@@ -280,8 +280,8 @@ struct DenseLayer[
                 adams_bias_m2_tensor[i] = m2_new
 
 
-        weight_temp_buffer = self.ctx.enqueue_create_buffer[DType.float32](M * N * steps - 1)
-        bias_temp_buffer   = self.ctx.enqueue_create_buffer[DType.float32](M * steps - 1)
+        weight_temp_buffer = self.ctx.enqueue_create_buffer[DType.float32](M * N * (steps - 1))
+        bias_temp_buffer   = self.ctx.enqueue_create_buffer[DType.float32](M * (steps - 1))
 
         weight_temp_tensor = LayoutTensor[DType.float32, Layout.row_major(M, N, steps - 1), MutAnyOrigin](weight_temp_buffer)
         bias_temp_tensor   = LayoutTensor[DType.float32, Layout.row_major(M,    steps - 1), MutAnyOrigin](bias_temp_buffer)

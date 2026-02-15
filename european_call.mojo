@@ -70,10 +70,6 @@ struct EuropeanCallLoss[num_inputs: Int, steps: Int, num_paths: Int]:
                 slippage:      Float32,
         ):
             path = Int(thread_idx.x)
-
-            if path >= num_paths:
-                return
-
             value: Float32 = 0
             for step in range(1, steps):
                 value += input_tensor[2, step, path][0] * (

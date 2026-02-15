@@ -1,0 +1,55 @@
+html, body {
+    height: 100vh;
+    margin: 0;
+    padding: 0;
+}
+
+body, input {
+    font-family: 'Courier', 'Courier New', monospace;
+    color: #dddddd;
+    font-size: 1em;
+    font-weight: 600;
+}
+
+.container {
+    height: 100vh;
+    background-color: #222222;
+    display: grid;
+    grid-template-columns: 1fr 3fr;
+    gap: 0.5em;
+    margin: 0;
+}
+
+.card {
+    background-color: #333333;
+}
+
+.parameters-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4em;
+    margin: 0.4em;
+}
+
+.m-04 {
+    margin: 0.4em;
+}
+
+input {
+    background-color: #222222;
+    border: 1px solid #222222;
+}
+
+input:focus {
+    outline: none;
+    border: 1px solid #dddddd;
+}
+
+input[type="button"] {
+    cursor: pointer;
+}
+
+input[type="number"] {
+    -moz-appearance: textfield;
+}
+

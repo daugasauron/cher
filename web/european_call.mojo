@@ -1,5 +1,8 @@
-from gpu.host import DeviceContext, DeviceBuffer, DeviceAttribute
-from gpu import block_dim, block_idx, thread_idx, barrier, block
+from python import PythonObject
+from time import monotonic
+from gpu.host import DeviceContext, DeviceBuffer, DeviceAttribute, HostBuffer
+from gpu import block_dim, block_idx, thread_idx, barrier
+from gpu.primitives import block
 from buffer import NDBuffer
 from utils import IndexList
 from random import NormalRandom
@@ -7,9 +10,41 @@ from math import exp, sqrt
 from dense_layer import DenseLayer, TPB
 from activation import ReluActivation, TanhActivation
 
-alias dtype = DType.float32
+comptime dtype = DType.float32
 
-struct EuropeanCallLoss:
+fn generate_paths_kernel(
+        inputs:    Int,
+        num_steps: Int,
+        num_paths: Int,
+        drift:     Float32,
+        vol:       Float32,
+        seed:      UInt64,
+        ptr:       UnsafePointer[Float32, MutAnyOrigin],
+):
+    path = Int(thread_idx.x)
+
+    x = NDBuffer[dtype, 3, MutAnyOrigin](ptr, IndexList[3](inputs, num_steps, num_paths))
+
+    x[0, 0, path] = 1
+    x[1, 0, path] = 1
+    x[2, 0, path] = 0
+
+    dt = 1.0 / Float32(num_steps - 1)
+
+    thread_seed = seed * UInt64(block_dim.x + thread_idx.x)
+    random = NormalRandom(seed=thread_seed)
+
+    for step in range(1, num_steps):
+        if step < num_steps - 1:
+            x[0, step, path] = 1 - dt * Float32(step)
+        else:
+            x[0, step, path] = 0
+
+        z = Float32(random.step_normal()[0])
+        x[1, step, path] = x[1, step - 1, path] * exp((drift - 0.5 * vol ** 2)*dt + vol * sqrt(dt) * z)
+        x[2, step, path] = 0
+
+struct EuropeanCallLoss(Movable):
 
     var ctx: DeviceContext
 
@@ -26,14 +61,14 @@ struct EuropeanCallLoss:
     fn __init__(
             out self, 
             ctx:        DeviceContext,
-            inputs: Int,
+            inputs:     Int,
             num_steps:  Int,
             num_paths:  Int,
             strike:     Float32,
             slippage:   Float32,
     ) raises:
         self.ctx           = ctx
-        self.inputs    = inputs
+        self.inputs        = inputs
         self.num_steps     = num_steps
         self.num_paths     = num_paths
         self.strike        = strike
@@ -48,7 +83,6 @@ struct EuropeanCallLoss:
         self.ctx.synchronize()
 
         return host_buffer[0]
-
 
     fn fwd(self, input_buffer: DeviceBuffer) raises:
 
@@ -78,11 +112,10 @@ struct EuropeanCallLoss:
             payoff: Float32 = max(x[1, num_steps - 1, path] - strike, 0)
             error:  Float32 = (value - payoff) ** 2
 
-            total_error = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](error))
-
             barrier()
 
             if thread_idx.x == 0:
+                total_error = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](error))
                 y_ptr[0] = total_error
 
         self.ctx.enqueue_function_experimental[fwd_kernel](
@@ -171,9 +204,10 @@ struct Params(ImplicitlyCopyable):
     var strike:   Float32
     var slippage: Float32
 
-    var seed: Int
+    var seed: UInt64
 
-struct Network:
+
+struct Network(Movable):
 
     var params: Params
     var ctx:    DeviceContext
@@ -244,39 +278,44 @@ struct Network:
                 params.slippage,
         )
 
+    fn __moveinit__(out self, deinit existing: Self):
+        self.params = existing.params^
+        self.ctx = existing.ctx^
+        self.layer_1 = existing.layer_1^
+        self.layer_2 = existing.layer_2^
+        self.layer_3 = existing.layer_3^
+        self.loss = existing.loss^
+
+    fn generate_test_path(self) raises -> HostBuffer[dtype]:
+
+        seed: UInt64 = UInt64(monotonic())
+
+        comptime num_paths = 1
+
+        buffer_size = self.params.inputs * self.params.num_steps
+
+        buffer = self.ctx.enqueue_create_buffer[dtype](buffer_size)
+        host_buffer = self.ctx.enqueue_create_host_buffer[dtype](buffer_size)
+
+        self.ctx.enqueue_function_experimental[generate_paths_kernel](
+                self.params.inputs,
+                self.params.num_steps,
+                num_paths,
+                self.params.drift,
+                self.params.vol,
+                seed,
+                buffer,
+                grid_dim=(1),
+                block_dim=(num_paths),
+        )
+
+        self.ctx.synchronize()
+        self.ctx.enqueue_copy(dst_buf=host_buffer, src_buf=buffer)
+        self.ctx.synchronize()
+
+        return host_buffer
+
     fn generate_paths(self) raises:
-
-        fn generate_paths_kernel(
-                inputs:    Int,
-                num_steps: Int,
-                num_paths: Int,
-                drift:     Float32,
-                vol:       Float32,
-                seed:      Int,
-                ptr:       UnsafePointer[Float32, MutAnyOrigin],
-        ):
-            path = Int(thread_idx.x)
-
-            x = NDBuffer[dtype, 3, MutAnyOrigin](ptr, IndexList[3](inputs, num_steps, num_paths))
-
-            x[0, 0, path] = 1
-            x[1, 0, path] = 1
-            x[2, 0, path] = 0
-
-            dt = Float32(1.0 / (num_steps - 1))
-
-            thread_seed = seed * Int(block_dim.x + thread_idx.x)
-            random = NormalRandom(seed=thread_seed)
-
-            for step in range(1, num_steps):
-                if step < num_steps - 1:
-                    x[0, step, path] = 1 - dt * step
-                else:
-                    x[0, step, path] = 0
-
-                z = Float32(random.step_normal()[0])
-                x[1, step, path] = x[1, step - 1, path] * exp((drift - 0.5 * vol ** 2)*dt + vol * sqrt(dt) * z)
-                x[2, step, path] = 0
 
         self.ctx.enqueue_function_experimental[generate_paths_kernel](
                 self.params.inputs,
@@ -394,6 +433,9 @@ struct Network:
 
 
     fn fwd(self) raises:
+        self.fwd(self.params.num_paths)
+
+    fn fwd(self, num_paths: Int) raises:
 
         for step in range(self.params.num_steps - 1):
 
@@ -418,11 +460,22 @@ struct Network:
             self.layer_1.bwd(self.layer_2.d_buffer)
             self.update_loss_grad(step)
 
-
     fn run(mut self) raises:
         self.generate_paths()
         self.fwd()
         self.bwd()
+
+    fn run_test(self, test_path: HostBuffer[dtype]) raises:
+        tmp_buffer = self.ctx.enqueue_create_buffer[DType.float32](
+                self.params.inputs * self.params.num_steps
+        )
+        self.ctx.enqueue_copy(dst_buf=tmp_buffer, src_buf=test_path)
+        self.ctx.synchronize()
+        self.layer_1.put_test_path(tmp_buffer)
+        self.fwd(1)
+        self.layer_1.get_test_path(tmp_buffer)
+        self.ctx.enqueue_copy(dst_buf=test_path, src_buf=tmp_buffer)
+        self.ctx.synchronize()
 
     fn loss_value(self) raises -> Float32:
         host_buffer = self.ctx.enqueue_create_host_buffer[dtype](1)
@@ -468,7 +521,7 @@ fn main() raises:
 
     while True:
         @parameter
-        for _ in range(1_000):
+        for _ in range(100):
             network.run()
         print(network.loss_value())
 
