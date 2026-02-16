@@ -166,12 +166,11 @@ def configure_static(app: FastAPI):
 
 LOGIN_HTML = '''<!DOCTYPE html>
 <html><head><title>cher - login</title>
-<style>body{background:#1e1e2e;color:#cdd6f4;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
-form{display:flex;flex-direction:column;gap:8px}input{padding:6px;font-family:monospace}</style>
-</head><body><form method="post" action="/login">
+<link rel="stylesheet" type="text/css" href="/styles.css">
+</head><body class="login-form"><div class="card m-04"><form method="post" action="/login" class="m-04">
 <input type="password" name="password" placeholder="password" autofocus>
 <input type="submit" value="login">
-</form></body></html>'''
+</form></div></body></html>'''
 
 
 class CookieAuthMiddleware:
@@ -195,7 +194,7 @@ class CookieAuthMiddleware:
 
         path = scope.get('path', '')
 
-        if path == '/login':
+        if path in ('/login', '/styles.css'):
             await self.app(scope, receive, send)
             return
 

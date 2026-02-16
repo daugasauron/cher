@@ -45,11 +45,19 @@ input:focus {
     border: 1px solid #dddddd;
 }
 
-input[type="button"] {
+input[type="button"], input[type="submit"] {
     cursor: pointer;
 }
 
 input[type="number"] {
     -moz-appearance: textfield;
+}
+
+.login-form {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    background-color: #222222;
 }
 
