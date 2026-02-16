@@ -64,7 +64,6 @@
                     plotlyConfig,
                 );
 
-
                 ws = new WebSocket('/ws');
 
                 ws.onopen = () => console.log('websocket connected');
@@ -139,9 +138,21 @@
                 if (running) {
                     button.value = 'start';
                     running = false;
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        const message = JSON.stringify({
+                            'event': 'stop',
+                        });
+                        ws.send(message);
+                    }
                 } else {
                     button.value = 'stop';
                     running = true;
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        const message = JSON.stringify({
+                            'event': 'start',
+                        });
+                        ws.send(message);
+                    }
                 }
             }
             function generatePath() {

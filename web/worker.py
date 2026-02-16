@@ -5,23 +5,42 @@ import socket
 import struct
 import itertools
 import mojo.importer
+from enum import IntEnum
 from cher_mojo import Network
 
 BATCH_UPDATE_SIZE = 10
 
-class MessageReceive:
-    GENERATE_TEST_PATH: int = 1
-    SET_SLIPPAGE: int       = 2
+class MessageReceive(IntEnum):
+    START              = 1
+    STOP               = 2
+    GENERATE_TEST_PATH = 3
+    SET_SLIPPAGE       = 4
 
-class MessageSend:
-    LOSS: int      = 1
-    TEST_PATH: int = 2
-    PARAMS: int    = 3
+class MessageSend(IntEnum):
+    LOSS      = 1
+    TEST_PATH = 2
+    PARAMS    = 3
+
+
+def send_test_path(conn, test_path):
+    inputs    = test_path.get_inputs()
+    num_steps = test_path.get_num_steps()
+    data      = test_path.get_data()
+
+    msg = struct.pack(
+            f'!3h{int(inputs * num_steps)}f',
+            MessageSend.TEST_PATH,
+            inputs,
+            num_steps,
+            *list(itertools.chain.from_iterable(data)),
+    )
+    conn.sendall(msg)
 
 
 def main():
 
     iteration = 0
+    running = False
 
     socket_path = sys.argv[1]
 
@@ -41,9 +60,7 @@ def main():
 
         print('Client connected')
 
-        # Send initial params to client
         params = network.get_params()
-        # Clean up float precision issues using significant figures
         for key, value in params.items():
             if isinstance(value, float):
                 params[key] = float(f'{value:.6g}')
@@ -56,13 +73,18 @@ def main():
             try:
                 msg_type_data = conn.recv(2)
                 msg_type, = struct.unpack('!h', msg_type_data)
-                print(f'worker received msg type: {msg_type}')
+                print(f'worker received msg type: {MessageReceive(msg_type).name}')
 
                 match msg_type:
+                    case MessageReceive.START:
+                        running = True
+                    case MessageReceive.STOP:
+                        running = False
                     case MessageReceive.GENERATE_TEST_PATH:
                         print('Generate test path')
                         test_path = network.test_path()
-
+                        network.run_test(test_path)
+                        send_test_path(conn, test_path)
                     case MessageReceive.SET_SLIPPAGE:
                         data = conn.recv(4)
                         slippage, = struct.unpack('!f', data)
@@ -73,34 +95,23 @@ def main():
 
             except BlockingIOError as e:
                 pass
-            except Exception as e:
-                print(e)
 
-            network.run()
-            iteration += 1
+            if running:
+                try:
+                    network.run()
+                    iteration += 1
+                    loss = network.loss()
 
-            loss = network.loss()
+                    if iteration % BATCH_UPDATE_SIZE == 0:
+                        if test_path:
+                            network.run_test(test_path)
 
-            if iteration % BATCH_UPDATE_SIZE == 0:
-                print(f'loss: {loss}')
-                if test_path:
-                    network.run_test(test_path)
+                        msg = struct.pack('!hf', MessageSend.LOSS, loss)
+                        conn.sendall(msg)
 
-                msg = struct.pack('!hf', MessageSend.LOSS, loss)
-                conn.sendall(msg)
-
-                inputs    = test_path.get_inputs()
-                num_steps = test_path.get_num_steps()
-                data      = test_path.get_data()
-
-                msg = struct.pack(
-                        f'!3h{int(inputs * num_steps)}f',
-                        MessageSend.TEST_PATH,
-                        inputs,
-                        num_steps,
-                        *list(itertools.chain.from_iterable(data)),
-                )
-                conn.sendall(msg)
+                        send_test_path(conn, test_path)
+                except Exception as e:
+                    print(e)
 
 if __name__ == '__main__':
     main()
