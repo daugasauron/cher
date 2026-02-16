@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import secrets
 import worker as w
 import struct
 import plotly
@@ -9,8 +10,9 @@ import uvicorn
 import subprocess
 import mojo.importer
 from itertools import count
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from concurrent.futures import ProcessPoolExecutor
 from cher_mojo import Network
 
@@ -32,8 +34,9 @@ async def worker_sender(
             writer.write(struct.pack('!h', w.MessageReceive.STOP))
         elif msg_type == 'event' and msg_value == 'generate_path':
             writer.write(struct.pack('!h', w.MessageReceive.GENERATE_TEST_PATH))
-        elif msg_type == 'slippage':
-            writer.write(struct.pack('!hf', w.MessageReceive.SET_SLIPPAGE, msg_value))
+        elif msg_type == 'param':
+            param_json = json.dumps(msg_value).encode('utf-8')
+            writer.write(struct.pack('!hI', w.MessageReceive.SET_PARAM, len(param_json)) + param_json)
 
         await writer.drain()
 
@@ -135,8 +138,9 @@ def configure_ws(app: FastAPI):
                 if 'event' in parameters:
                     await message_queue.put(('event', parameters['event']))
 
-                if 'slippage' in parameters:
-                    await message_queue.put(('slippage', parameters['slippage']))
+                for key, value in parameters.items():
+                    if key != 'event':
+                        await message_queue.put(('param', {key: value}))
 
         except WebSocketDisconnect:
             print('disconnected')
@@ -152,16 +156,93 @@ def configure_static(app: FastAPI):
 
     static_dir = os.path.join(os.path.dirname(__file__), STATIC_DIR_NAME)
     static_files = StaticFiles(directory=static_dir)
+
+    @app.get('/')
+    async def root():
+        return RedirectResponse('/index.html')
+
     app.mount('/', static_files)
+
+
+LOGIN_HTML = '''<!DOCTYPE html>
+<html><head><title>cher - login</title>
+<style>body{background:#1e1e2e;color:#cdd6f4;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
+form{display:flex;flex-direction:column;gap:8px}input{padding:6px;font-family:monospace}</style>
+</head><body><form method="post" action="/login">
+<input type="password" name="password" placeholder="password" autofocus>
+<input type="submit" value="login">
+</form></body></html>'''
+
+
+class CookieAuthMiddleware:
+    def __init__(self, app, password: str):
+        self.app = app
+        self.password = password
+
+    def _get_cookie(self, headers: list[tuple[bytes, bytes]]) -> str:
+        for key, value in headers:
+            if key == b'cookie':
+                for item in value.decode().split(';'):
+                    item = item.strip()
+                    if item.startswith('cher_token='):
+                        return item.split('=', 1)[1]
+        return ''
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] not in ('http', 'websocket'):
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get('path', '')
+
+        if path == '/login':
+            await self.app(scope, receive, send)
+            return
+
+        token = self._get_cookie(scope.get('headers', []))
+        if secrets.compare_digest(token, self.password):
+            await self.app(scope, receive, send)
+            return
+
+        if scope['type'] == 'websocket':
+            await send({'type': 'websocket.close', 'code': 1008})
+            return
+
+        response = RedirectResponse('/login')
+        await response(scope, receive, send)
+
+
+def configure_auth(app: FastAPI, password: str):
+
+    @app.get('/login', response_class=HTMLResponse)
+    async def login_page():
+        return LOGIN_HTML
+
+    @app.post('/login')
+    async def login(request: Request):
+        form = await request.form()
+        pw = form.get('password', '')
+        if secrets.compare_digest(pw, password):
+            response = RedirectResponse('/', status_code=303)
+            response.set_cookie('cher_token', pw, httponly=True)
+            return response
+        return RedirectResponse('/login', status_code=303)
 
 
 def main():
     app = FastAPI()
 
+    password = os.environ.get('CHER_PASSWORD')
+
     configure_ws(app)
+
+    if password:
+        configure_auth(app, password)
+        app.add_middleware(CookieAuthMiddleware, password=password)
+
     configure_static(app)
 
-    uvicorn.run(app)
+    uvicorn.run(app, host='0.0.0.0', port=9000)
 
 
 if __name__ == '__main__':

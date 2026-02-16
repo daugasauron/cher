@@ -27,6 +27,7 @@ fn PyInit_cher_mojo() -> PythonObject:
                 .def_method[PythonNetwork.update_lr]('update_lr')
                 .def_method[PythonNetwork.get_params]('get_params')
                 .def_method[PythonNetwork.set_slippage]('set_slippage')
+                .def_method[PythonNetwork.set_strike]('set_strike')
                 .def_method[PythonNetwork.reset_counters]('reset_counters')
 
         return m.finalize()
@@ -144,7 +145,7 @@ struct PythonNetwork(
                 network_size = 16,
                 num_steps    = 30,
                 num_paths    = 1024,
-                lr           = 1e-2,
+                lr           = 1e-3,
                 lr_d1        = 0.95,
                 lr_d2        = 10_000,
                 beta1        = 0.9,
@@ -214,6 +215,11 @@ struct PythonNetwork(
     fn set_slippage(py_self: PythonObject, slippage: PythonObject) raises:
         self_ptr = py_self.downcast_value_ptr[Self]()
         self_ptr[].network.params.slippage = Float32(py=slippage)
+
+    @staticmethod
+    fn set_strike(py_self: PythonObject, strike: PythonObject) raises:
+        self_ptr = py_self.downcast_value_ptr[Self]()
+        self_ptr[].network.params.strike = Float32(py=strike)
 
     @staticmethod
     fn reset_counters(py_self: PythonObject) raises:

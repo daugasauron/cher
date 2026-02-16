@@ -14,7 +14,7 @@ class MessageReceive(IntEnum):
     START              = 1
     STOP               = 2
     GENERATE_TEST_PATH = 3
-    SET_SLIPPAGE       = 4
+    SET_PARAM          = 4
 
 class MessageSend(IntEnum):
     LOSS      = 1
@@ -85,12 +85,20 @@ def main():
                         test_path = network.test_path()
                         network.run_test(test_path)
                         send_test_path(conn, test_path)
-                    case MessageReceive.SET_SLIPPAGE:
-                        data = conn.recv(4)
-                        slippage, = struct.unpack('!f', data)
-                        print(f'Set slippage: {slippage}')
-                        network.set_slippage(slippage)
-                        network.reset_counters()
+                    case MessageReceive.SET_PARAM:
+                        length_data = conn.recv(4)
+                        length, = struct.unpack('!I', length_data)
+                        param_data = conn.recv(length)
+                        param = json.loads(param_data.decode('utf-8'))
+                        name, value = next(iter(param.items()))
+                        print(f'Set {name}: {value}')
+                        match name:
+                            case 'slippage':
+                                network.set_slippage(value)
+                                network.reset_counters()
+                            case 'strike':
+                                network.set_strike(value)
+                                network.reset_counters()
 
 
             except BlockingIOError as e:

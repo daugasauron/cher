@@ -66,6 +66,30 @@
 
                 ws = new WebSocket('/ws');
 
+                document.getElementById('parameters_form').addEventListener('input', function(event) {
+                    const element = event.target;
+                    const name = element.name;
+                    const dataType = element.getAttribute('data-type');
+                    let value = element.value;
+
+                    if (dataType == 'int') {
+                        value = parseInt(value, 10);
+                    } else if (dataType == 'float') {
+                        value = parseFloat(value);
+                    }
+
+                    if (name == 'strike') {
+                        strikeTrace.y = [value, value];
+                        Plotly.react(testPathPlotElement, [strikeTrace, ...testPathTraces], plotlyLayout);
+                    }
+
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        const jsonData = {};
+                        jsonData[name] = value;
+                        ws.send(JSON.stringify(jsonData));
+                    }
+                });
+
                 ws.onopen = () => console.log('websocket connected');
                 ws.onclose = () => console.log('websocket closed');
                 ws.onmessage = (event) => {
@@ -351,25 +375,5 @@
                 <div class="m-04" id="test_path_plot"></div>
             </div>
         </div>
-        <script>
-            document.getElementById("parameters_form").addEventListener("input", function(event) {
-                if (ws.readyState == ws.OPEN) {
-                    const element = event.target;
-                    const name = element.name;
-                    const dataType = element.getAttribute('data-type');
-                    let value = element.value;
-
-                    if (dataType == 'int') {
-                        value = parseInt(value, 10);
-                    } else if (dataType == 'float') {
-                        value = parseFloat(value);
-                    }
-
-                    const jsonData = {};
-                    jsonData[name] = value;
-                    ws.send(JSON.stringify(jsonData));
-                }
-            });
-        </script>
     </body>
 </html>
