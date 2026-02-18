@@ -209,6 +209,7 @@ struct Network(Movable):
     def __init__(out self, params: Params):
         self.params = params
         self.ctx = DeviceContext()
+        print('Running on', self.ctx.name())
 
         self.layer_1 = DenseLayer[ReluActivation](
                 self.ctx,

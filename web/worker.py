@@ -6,7 +6,10 @@ import struct
 import itertools
 import mojo.importer
 from enum import IntEnum
-from cher_mojo import Network
+if os.environ.get('CHER_DEVICE') == 'cpu':
+    from cher_mojo_cpu import Network
+else:
+    from cher_mojo import Network
 
 BATCH_UPDATE_SIZE = 10
 
