@@ -104,9 +104,9 @@ struct EuropeanCallLoss(Movable):
 
             barrier()
 
+            total_error = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](error))
             if thread_idx.x == 0:
-                total_error = block.sum[block_size=TPB, broadcast=False](val=SIMD[DType.float32, 1](error))
-                y_ptr[0] = total_error
+                y_ptr[0] = total_error / num_paths
 
         self.ctx.enqueue_function_experimental[fwd_kernel](
                 self.params_ptr[].inputs,
@@ -156,7 +156,7 @@ struct EuropeanCallLoss(Movable):
                 s_c = x[1, step - 1, path]
                 s_n = x[1, step,     path]
 
-                y[0, step - 1, path] = 2 * (value - payoff) * (s_n * (1 + slippage) - s_c * (1 - slippage))
+                y[0, step - 1, path] = 2 * (value - payoff) * (s_n * (1 + slippage) - s_c * (1 - slippage)) / num_paths
 
         self.ctx.enqueue_function_experimental[bwd_kernel](
                 self.params_ptr[].inputs,

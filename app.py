@@ -60,9 +60,9 @@ async def worker_receiver(
                 await ws.send_json({'params': params})
 
             case w.MessageSend.LOSS:
-                data = await reader.readexactly(4)
-                loss, = struct.unpack('!f', data)
-                await ws.send_json({'loss': loss})
+                data = await reader.readexactly(8)
+                loss, avg_step_time = struct.unpack('!ff', data)
+                await ws.send_json({'loss': loss, 'avg_step_time': avg_step_time})
 
             case w.MessageSend.TEST_PATH:
                 metadata = await reader.readexactly(4)
@@ -112,6 +112,7 @@ async def worker_messaging(
 
         except Exception as e:
             print(e)
+            await asyncio.sleep(0.5)
 
 
 def configure_ws(app: FastAPI):
@@ -144,10 +145,11 @@ def configure_ws(app: FastAPI):
 
         except WebSocketDisconnect:
             print('disconnected')
-            listener_task.cancel()
-            worker_process.terminate()
         except Exception as e:
             print(e)
+        finally:
+            listener_task.cancel()
+            worker_process.terminate()
 
 
 def configure_static(app: FastAPI):

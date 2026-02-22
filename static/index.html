@@ -10,6 +10,7 @@
 
             document.addEventListener('DOMContentLoaded', () => {
                 const lossElement = document.getElementById('loss');
+                const stepTimeElement = document.getElementById('step_time');
                 const strikeInputElement = document.getElementById('strike');
                 const testPathPlotElement = document.getElementById('test_path_plot');
 
@@ -109,6 +110,9 @@
                     if ('loss' in data) {
                         lossElement.textContent = data.loss;
                     }
+                    if ('avg_step_time' in data) {
+                        stepTimeElement.textContent = formatTime(data.avg_step_time);
+                    }
                     if ('test_path' in data) {
                         testPathTraces = [
                             {
@@ -136,6 +140,18 @@
                     }
                 };
             });
+
+            function formatTime(seconds) {
+                if (seconds >= 1) {
+                    return seconds.toFixed(3) + ' s';
+                } else if (seconds >= 1e-3) {
+                    return (seconds * 1e3).toFixed(3) + ' ms';
+                } else if (seconds >= 1e-6) {
+                    return (seconds * 1e6).toFixed(3) + ' \u00B5s';
+                } else {
+                    return (seconds * 1e9).toFixed(3) + ' ns';
+                }
+            }
 
             function formDataAsJson() {
                 const formData = new FormData(document.getElementById('parameters_form'));
@@ -364,6 +380,7 @@
             </div>
             <div class="card">
                 <div class="m-04">loss: <span id="loss"></span></div>
+                <div class="m-04">step: <span id="step_time"></span></div>
                 <div class="m-04">
                     <input type="button" 
                            id="generate_path_button" 
